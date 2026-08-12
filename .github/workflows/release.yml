@@ -97,6 +97,23 @@ jobs:
 
           echo "version=$version publish=$publish owner=$owner_lc"
 
+      # verify-charts.sh silently downgrades to "no schema validation" when
+      # kubeconform is absent, which is what the first dry run did here — the
+      # release gate was quietly weaker than CI's. Install it so a tag runs the
+      # same check main does. Kept in step with the copy in ci.yml.
+      - name: Install kubeconform
+        env:
+          KUBECONFORM_VERSION: "0.8.0"
+        run: |
+          set -euo pipefail
+          cd "$(mktemp -d)"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
+            -o kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          tar -xzf kubeconform.tar.gz kubeconform
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+
       - name: Guard rails and render matrix
         run: scripts/verify-charts.sh all
 

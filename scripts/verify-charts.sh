@@ -91,10 +91,10 @@ section_render() {
     --set expose.mode=gateway --set expose.host=headroom.example.com \
     --set expose.gateway.parentRefs[0].name=gw \
     --set expose.gateway.parentRefs[0].namespace=gateway-system
-  render hr-memory charts/headroom --set memory.enabled=true
+  render hr-memory charts/headroom --set memory.enabled=true --set memory.embeddings.apiKey=sk-test
   render hr-stateless charts/headroom --set stateless=true --set replicaCount=3
   render hr-external charts/headroom \
-    --set memory.enabled=true \
+    --set memory.enabled=true --set memory.embeddings.apiKey=sk-test \
     --set memory.qdrant.enabled=false \
     --set memory.qdrant.external.enabled=true \
     --set memory.qdrant.external.url=https://qdrant.example.com:6333 \
@@ -205,11 +205,16 @@ section_guards() {
     --set expose.mode=gateway --set expose.host=h.example.com \
     --set expose.gateway.parentRefs[0].name=gw
   expect_fail 'published upstream image' charts/headroom \
-    --set memory.enabled=true --set image.repository=ghcr.io/chopratejas/headroom
+    --set memory.enabled=true --set memory.embeddings.apiKey=sk-test --set image.repository=ghcr.io/chopratejas/headroom
   expect_fail 'incompatible with stateless=true' charts/headroom \
-    --set memory.enabled=true --set stateless=true
+    --set memory.enabled=true --set memory.embeddings.apiKey=sk-test --set stateless=true
   expect_fail 'memory.qdrant.external.enabled=true requires' charts/headroom \
-    --set memory.enabled=true --set memory.qdrant.external.enabled=true
+    --set memory.enabled=true --set memory.embeddings.apiKey=sk-test --set memory.qdrant.external.enabled=true
+  # Qdrant stores vectors, it does not make them. Without a key the proxy
+  # starts, serves, and never reports ready — the guard turns that into a
+  # template error instead of a CrashLoopBackOff.
+  expect_fail 'requires memory.embeddings.apiKey' charts/headroom \
+    --set memory.enabled=true
 
   # -- ix
   expect_fail 'ix: expose.mode must be one of' charts/ix --set expose.mode=bogus
@@ -235,9 +240,9 @@ section_guards() {
   # release.yml started publishing it. If it ever refuses again, the default
   # image.repository has drifted back to upstream.
   expect_ok 'memory.enabled=true on the default (patched) image' charts/headroom \
-    --set memory.enabled=true
+    --set memory.enabled=true --set memory.embeddings.apiKey=sk-test
   expect_ok 'acknowledgeUnpatchedImage overrides the guard' charts/headroom \
-    --set memory.enabled=true --set image.repository=ghcr.io/chopratejas/headroom \
+    --set memory.enabled=true --set memory.embeddings.apiKey=sk-test --set image.repository=ghcr.io/chopratejas/headroom \
     --set memory.acknowledgeUnpatchedImage=true
   expect_ok 'acknowledgeUnauthenticated overrides the ix guard' charts/ix \
     --set expose.mode=ingress --set expose.host=i.example.com \

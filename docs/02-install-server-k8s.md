@@ -263,14 +263,49 @@ the patch, `memory.acknowledgeUnpatchedImage: true` overrides the guard.
 
 ### Semantic memory (Qdrant + Neo4j)
 
-Off by default — it adds two StatefulSets and about 40Gi. On the default image
-it is a one-line change:
+Off by default — it adds two StatefulSets and about 40Gi. Turning it on takes
+two settings, not one, because Qdrant stores vectors but does not produce them:
 
 ```yaml
 headroom:
   memory:
     enabled: true
+    embeddings:
+      existingSecret: headroom-embeddings   # key: api-key
 ```
+
+Upstream's `qdrant-neo4j` backend embeds through an OpenAI-compatible
+`/v1/embeddings` endpoint (`text-embedding-3-small`). With no key it fails to
+initialize on every attempt, and because that failure is fail-open the proxy
+starts, serves traffic, and simply never reports ready — `/readyz` stays 503
+with `memory.initialized: false` until the startup probe kills the pod. So the
+chart refuses to render instead:
+
+```
+headroom: memory.enabled=true requires memory.embeddings.apiKey or
+memory.embeddings.existingSecret. Qdrant stores vectors but does not produce
+them …
+```
+
+This is the **only** provider credential the proxy holds. Everything under
+`/v1/*` still forwards each caller's own key upstream — see
+[doc 5](05-security.md).
+
+It does not have to be OpenAI. Point `baseUrl` at anything that speaks the same
+API — a local embeddings server, LiteLLM, Azure OpenAI — and no prompt text
+leaves your network:
+
+```yaml
+headroom:
+  memory:
+    enabled: true
+    embeddings:
+      baseUrl: http://litellm.llm.svc.cluster.local:4000/v1
+      apiKey: unused-but-required     # most gateways ignore it; the client insists
+```
+
+The model name is upstream's default, `text-embedding-3-small`, and is not
+configurable from the chart — serve it under that name, as an alias if need be.
 
 `memory.enabled=true` is incompatible with `stateless=true` (upstream disables
 memory when `HEADROOM_STATELESS` is set); the chart fails on that combination
@@ -385,6 +420,7 @@ Both charts validate at template time so a misconfiguration fails at
 | `expose.mode: gateway` and Gateway API not installed | both |
 | `external.enabled` with no URL/URI/host | both |
 | `memory.enabled` on an unpatched image | headroom |
+| `memory.enabled` with no embeddings key | headroom |
 | `memory.enabled` with `stateless: true` | headroom |
 | `auth.mode: basic` with `expose.mode: gateway` | ix |
 | `auth.mode` set but its Secret unnamed | ix |

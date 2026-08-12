@@ -119,6 +119,20 @@ spec:
                 secretKeyRef:
                   name: {{ include "headroom.neo4jSecretName" . }}
                   key: {{ include "headroom.neo4jSecretKey" . }}
+            # Embeddings. Upstream's DirectMem0Adapter constructs a bare
+            # OpenAI() client, which reads these two names and no others —
+            # there is no HEADROOM_* alias to use instead. Guaranteed present:
+            # headroom.validate refuses to render memory.enabled=true without
+            # a key.
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "headroom.embeddingsSecretName" . }}
+                  key: {{ include "headroom.embeddingsSecretKey" . }}
+            {{- with .Values.memory.embeddings.baseUrl }}
+            - name: OPENAI_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}

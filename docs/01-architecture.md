@@ -62,12 +62,18 @@ more than one replica — at the cost of that history and of local memory.
 | backend        | what it is                                    | needs        |
 | -------------- | --------------------------------------------- | ------------ |
 | `local`        | SQLite on the workspace volume — **default**  | nothing      |
-| `qdrant-neo4j` | vector recall + a relationship graph          | a patched image, Qdrant, Neo4j |
+| `qdrant-neo4j` | vector recall + a relationship graph          | a patched image, Qdrant, Neo4j, an embeddings endpoint |
 
 The published upstream image cannot be configured to reach a Neo4j at all, so
 `charts/headroom` defaults `memory.enabled=false` and refuses to enable it on
 the stock image. See [patches/README.md](../patches/README.md) for the one-file
 fix and how to build the image.
+
+Qdrant stores vectors but does not produce them: `qdrant-neo4j` embeds through
+an OpenAI-compatible `/v1/embeddings` endpoint (`text-embedding-3-small`), so
+it also needs `memory.embeddings`. That can be OpenAI or anything speaking the
+same API — see [02-install-server-k8s.md](02-install-server-k8s.md#semantic-memory-qdrant--neo4j).
+`local` needs none of this; it embeds on-device.
 
 ---
 

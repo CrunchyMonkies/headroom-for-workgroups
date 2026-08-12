@@ -158,6 +158,29 @@ Either `stateless: true` (which disables all filesystem writes by design), or
 kubectl -n workgroup get pvc
 ```
 
+### `/readyz` says `"memory":{"initialized":false}` and the log has no error
+
+Look in the pod's own log file, not `kubectl logs` — the banner goes to stdout
+but the logger writes to the workspace:
+
+```sh
+kubectl -n workgroup exec deploy/wg-headroom -c proxy -- \
+  grep -i memory /home/nonroot/.headroom/logs/proxy.log | tail
+```
+
+`Memory: backend initialization failed (startup continues): Missing
+credentials … set the OPENAI_API_KEY environment variable` means the
+embeddings key is missing or wrong. Qdrant stores vectors; the `qdrant-neo4j`
+backend produces them through an OpenAI-compatible `/v1/embeddings` endpoint.
+Chart 0.1.1 refuses to render without `memory.embeddings.apiKey` or
+`.existingSecret`, so this only happens on 0.1.0, on a hand-edited Secret, or
+when `memory.embeddings.baseUrl` points somewhere that does not serve
+`text-embedding-3-small`.
+
+Note the shape of the failure: init is fail-open, so nothing crashes and
+nothing appears on stdout. The proxy runs, answers requests, and never reports
+ready — the startup probe restarts it every five minutes forever.
+
 ### Memory is enabled but nothing is being recalled
 
 Confirm the backend was actually selected:

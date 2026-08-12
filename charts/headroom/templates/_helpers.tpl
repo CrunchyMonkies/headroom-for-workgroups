@@ -126,11 +126,28 @@ neo4j-password
 {{- end -}}
 {{- end -}}
 
-{{/* True when the chart manages its own Secret (token and/or neo4j password). */}}
+{{- define "headroom.embeddingsSecretName" -}}
+{{- if .Values.memory.embeddings.existingSecret -}}
+{{- .Values.memory.embeddings.existingSecret -}}
+{{- else -}}
+{{- include "headroom.secretName" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "headroom.embeddingsSecretKey" -}}
+{{- if .Values.memory.embeddings.existingSecret -}}
+{{- .Values.memory.embeddings.existingSecretKey -}}
+{{- else -}}
+openai-api-key
+{{- end -}}
+{{- end -}}
+
+{{/* True when the chart manages its own Secret (token, neo4j password and/or embeddings key). */}}
 {{- define "headroom.createsSecret" -}}
 {{- $needToken := and .Values.auth.enabled (not .Values.auth.existingSecret) -}}
 {{- $needNeo := and (include "headroom.memoryActive" . | eq "true") .Values.memory.neo4j.enabled (not .Values.memory.neo4j.external.enabled) (not .Values.memory.neo4j.auth.existingSecret) -}}
-{{- if or $needToken $needNeo -}}true{{- else -}}false{{- end -}}
+{{- $needEmbed := and .Values.memory.enabled .Values.memory.embeddings.apiKey (not .Values.memory.embeddings.existingSecret) -}}
+{{- if or $needToken $needNeo $needEmbed -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
 {{- define "headroom.memoryActive" -}}
@@ -219,6 +236,9 @@ producing a running-but-wrong deployment.
   {{- $upstreamImage := "ghcr.io/chopratejas/headroom" -}}
   {{- if and (eq .Values.image.repository $upstreamImage) (not .Values.memory.acknowledgeUnpatchedImage) -}}
     {{- fail (printf "headroom: memory.enabled=true needs an image built with patches/0001-headroom-neo4j-config-surface.patch, but image.repository is set to the published upstream image %q. That image has no configuration surface for the Neo4j half of the qdrant-neo4j backend, so memory would silently stay on local SQLite. Remove your image.repository override to use this repo's patched build (the chart default), or set memory.acknowledgeUnpatchedImage=true if upstream has merged the patch." $upstreamImage) -}}
+  {{- end -}}
+  {{- if not (or .Values.memory.embeddings.apiKey .Values.memory.embeddings.existingSecret) -}}
+    {{- fail "headroom: memory.enabled=true requires memory.embeddings.apiKey or memory.embeddings.existingSecret. Qdrant stores vectors but does not produce them — the qdrant-neo4j backend embeds through an OpenAI-compatible /v1/embeddings endpoint, and with no key it fails to initialize on every attempt. The proxy would start, serve traffic, and never report ready: /readyz stays 503 with memory.initialized=false until the startup probe kills it. Set memory.embeddings.existingSecret to a Secret you manage (recommended), or memory.embeddings.apiKey. Point memory.embeddings.baseUrl at a self-hosted embeddings endpoint if you do not want to call OpenAI." -}}
   {{- end -}}
   {{- if and .Values.memory.qdrant.external.enabled (not .Values.memory.qdrant.external.url) -}}
     {{- fail "headroom: memory.qdrant.external.enabled=true requires memory.qdrant.external.url" -}}

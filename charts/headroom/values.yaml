@@ -96,6 +96,31 @@ memory:
   acknowledgeUnpatchedImage: false
   topK: 10
 
+  # Embeddings for the qdrant-neo4j backend. REQUIRED when memory.enabled=true.
+  #
+  # Qdrant stores the vectors; it does not produce them. Upstream's
+  # DirectMem0Adapter builds a bare `OpenAI()` client and embeds with
+  # text-embedding-3-small, so with no key the backend raises "Missing
+  # credentials" on every init attempt, /readyz reports
+  # memory.initialized=false forever, and the pod never passes its startup
+  # probe. The guard in _helpers.tpl refuses to render without one rather than
+  # let you find that out from a CrashLoopBackOff.
+  #
+  # This is the one provider credential the proxy holds itself. Everything
+  # under /v1/* still forwards each caller's own key upstream — see
+  # `upstream:` below.
+  embeddings:
+    # Inline key. Convenient, but it lands in the release's values; prefer
+    # existingSecret anywhere that matters.
+    apiKey: ""
+    # A Secret you manage. Wins over apiKey when set.
+    existingSecret: ""
+    existingSecretKey: api-key
+    # Any OpenAI-compatible /v1/embeddings endpoint — a local text-embeddings
+    # server, LiteLLM, Azure OpenAI. Sets OPENAI_BASE_URL. The key is still
+    # required; send a placeholder if your endpoint ignores it.
+    baseUrl: ""
+
   qdrant:
     enabled: true
     image:

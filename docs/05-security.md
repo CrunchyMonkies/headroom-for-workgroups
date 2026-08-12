@@ -22,6 +22,20 @@ plainly:
 - Revoking one person's access is a provider-side key revocation, not a
   redeployment.
 
+**One exception, and only with `memory.enabled: true`.** The `qdrant-neo4j`
+backend embeds through an OpenAI-compatible `/v1/embeddings` endpoint, so the
+proxy does hold `memory.embeddings.apiKey` — a shared key, in a Secret, that
+compromising the pod would yield. It is used for embeddings and nothing else;
+no `/v1/*` traffic is ever billed to it. Two things worth doing:
+
+- Scope it. A key restricted to the embeddings endpoint, or a spend cap, keeps
+  the blast radius to what it is actually for.
+- Or keep it in-house. `memory.embeddings.baseUrl` points at any compatible
+  endpoint, so a self-hosted embeddings server (or a gateway like LiteLLM)
+  removes both the shared key and the third party — memory text stops leaving
+  your network at all, which matters more than the key does, since what gets
+  embedded is the content of everyone's prompts.
+
 What the proxy *does* see is prompt and completion content in transit, and it
 records compression statistics. Treat it as it deserves: a service that sees
 everything your agents send.

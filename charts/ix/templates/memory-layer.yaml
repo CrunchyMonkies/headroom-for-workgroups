@@ -32,13 +32,18 @@ spec:
       initContainers:
         # Compose expressed this as `depends_on: service_healthy`; wait for
         # Arango to answer before the API starts querying it.
+        #
+        # /_admin/server/availability for the same reason as the probes in
+        # arangodb.yaml: /_api/version is behind authentication, this init
+        # container has no credentials, and wget would have looped on 401
+        # until the pod was deleted.
         - name: wait-for-arangodb
           image: {{ .Values.arangodb.waitImage | quote }}
           command:
             - sh
             - -c
             - |
-              until wget -qO- "http://{{ include "ix.arangoHost" . }}:{{ include "ix.arangoPort" . }}/_api/version" >/dev/null 2>&1; do
+              until wget -qO- "http://{{ include "ix.arangoHost" . }}:{{ include "ix.arangoPort" . }}/_admin/server/availability" >/dev/null 2>&1; do
                 echo "waiting for arangodb..."
                 sleep 3
               done

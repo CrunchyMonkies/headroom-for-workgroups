@@ -50,6 +50,18 @@ spec:
           env:
             - name: QDRANT__SERVICE__GRPC_PORT
               value: "6334"
+            # Qdrant's WORKDIR is /qdrant and its default snapshots_path is
+            # `./snapshots` — a directory baked into the image and owned by
+            # root. The pod runs as UID 1000, so on the first request that
+            # touches snapshots Qdrant panics with
+            #   Failed to create snapshots temp directory at ./snapshots/tmp:
+            #   PermissionDenied
+            # and CrashLoopBackOffs. Only the PVC at /qdrant/storage is
+            # group-writable (fsGroup: 1000), so put snapshots there. It also
+            # means snapshots survive a restart, which the image default does
+            # not.
+            - name: QDRANT__STORAGE__SNAPSHOTS_PATH
+              value: /qdrant/storage/snapshots
           ports:
             - name: http
               containerPort: 6333

@@ -72,6 +72,40 @@ kubectl -n workgroup describe pod -l app.kubernetes.io/component=proxy | grep -A
 
 Raise `resources.limits.memory` above the 4Gi default.
 
+### The startup probe keeps killing the pod, and the log looks fine
+
+The banner prints, the proxy says `Press Ctrl+C to stop`, and the pod is still
+restarted every few minutes. The startup probe is `GET /readyz`, and `/readyz`
+is an aggregate — one unhealthy dependency holds the whole pod out of service
+even though the process is running. Ask it which one:
+
+```sh
+kubectl -n workgroup exec deploy/wg-headroom -c proxy -- \
+  python -c 'import urllib.request,urllib.error
+try: print(urllib.request.urlopen("http://127.0.0.1:8787/readyz").read().decode())
+except urllib.error.HTTPError as e: print(e.code, e.read().decode())'
+```
+
+Every check reports separately. `"memory":{"ready":false,"initialized":false}`
+with everything else healthy means Headroom is up and Qdrant or Neo4j is not —
+go fix that pod, not this one. `kompress` reporting `degraded` is
+`"optional":true` and never blocks readiness.
+
+### Qdrant is in `CrashLoopBackOff` with `Failed to create snapshots temp directory`
+
+```
+Panic occurred in file src/actix/mod.rs: Failed to create snapshots temp
+directory at ./snapshots/tmp: PermissionDenied
+```
+
+Fixed in chart 0.1.1 — upgrade. Qdrant's working directory is `/qdrant`, its
+default `snapshots_path` is the relative `./snapshots`, and that directory
+comes from the image owned by root while the pod runs as uid 1000. Only the PVC
+at `/qdrant/storage` is group-writable. The chart now sets
+`QDRANT__STORAGE__SNAPSHOTS_PATH=/qdrant/storage/snapshots`; on an older chart
+you can set the same variable yourself. Headroom will sit at `0/1` with
+`memory.ready: false` for as long as this lasts.
+
 ### `CrashLoopBackOff` with permission errors on `/home/nonroot/.headroom`
 
 The image runs as uid 1000 and needs `fsGroup: 1000` to write the PVC. The
@@ -193,6 +227,20 @@ A password mismatch is the usual cause: ArangoDB persists its root user on
 disk, so if the volume survived a reinstall that regenerated the Secret, the
 two disagree. Either restore the old password into the Secret or delete the PVC
 and start clean.
+
+If instead ArangoDB's log ends with `ArangoDB … is ready for business` while
+the pod is `0/1` and restarting on its liveness probe, that is the 0.1.0 probe
+bug — upgrade to 0.1.1. Both probes and the init container polled
+`/_api/version`, which requires authentication that none of them carry, so all
+three saw 401 forever. `/_admin/server/availability` is the endpoint ArangoDB
+answers anonymously, and 0.1.1 uses it in all three places. Confirm which one
+you have:
+
+```sh
+kubectl -n workgroup describe pod wg-ix-arangodb-0 | grep -i 'probe failed'
+```
+
+`statuscode: 401` is this bug. Anything else is not.
 
 ### `ix map` fails with write conflicts
 

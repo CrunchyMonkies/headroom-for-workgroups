@@ -2,8 +2,8 @@ apiVersion: v2
 name: workgroup
 description: Headroom proxy + Ix codebase graph, deployed together for a development team
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.1
+appVersion: "0.1.1"
 keywords:
   - llm
   - proxy
@@ -16,10 +16,10 @@ maintainers:
   - name: headroom-for-workgroups
 dependencies:
   - name: headroom
-    version: 0.1.0
+    version: 0.1.1
     repository: "file://../headroom"
     condition: headroom.enabled
   - name: ix
-    version: 0.1.0
+    version: 0.1.1
     repository: "file://../ix"
     condition: ix.enabled

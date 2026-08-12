@@ -64,16 +64,23 @@ spec:
           ports:
             - name: arangodb
               containerPort: 8529
+          # /_admin/server/availability, not /_api/version. ArangoDB requires
+          # authentication on /_api and on the rest of /_admin, and this chart
+          # always sets a root password — so a /_api/version probe answers 401
+          # forever: never ready, and killed by the liveness probe every 30s.
+          # /_admin/server/availability is the one endpoint ArangoDB serves
+          # anonymously, and 200 there means exactly what a probe wants to know
+          # (up, recovered, accepting requests).
           readinessProbe:
             httpGet:
-              path: /_api/version
+              path: /_admin/server/availability
               port: arangodb
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 6
           livenessProbe:
             httpGet:
-              path: /_api/version
+              path: /_admin/server/availability
               port: arangodb
             initialDelaySeconds: 60
             periodSeconds: 30

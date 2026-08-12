@@ -31,7 +31,7 @@ Cluster-internal first. Nothing is exposed; you reach both through
 `kubectl port-forward`.
 
 ```sh
-helm install wg oci://ghcr.io/crunchymonkies/charts/workgroup --version 0.1.0 \
+helm install wg oci://ghcr.io/crunchymonkies/charts/workgroup --version 0.1.1 \
   -n workgroup --create-namespace
 ```
 

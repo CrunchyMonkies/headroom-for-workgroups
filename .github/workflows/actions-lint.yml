@@ -26,9 +26,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Deliberately unpinned: a zizmor release that adds an audit should be able
+      # to fail this job, which is the point of running it. The cost is that a
+      # new release can turn a green `main` red with no change of ours. When that
+      # happens, reproduce the runner's exact version locally rather than
+      # guessing — the packaged binary on your PATH is usually older:
+      #   uvx zizmor@<version> --min-severity=medium .github/
       - name: Run zizmor
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pipx install zizmor
+          zizmor --version
           zizmor --min-severity=medium .github/

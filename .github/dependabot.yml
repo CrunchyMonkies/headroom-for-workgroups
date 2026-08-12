@@ -14,6 +14,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Don't propose a version the day it appears. A compromised action release
+    # is usually caught and yanked within hours-to-days; a week of aging means
+    # Dependabot never hands us a SHA that the ecosystem has not looked at yet.
+    # zizmor's `dependabot-cooldown` audit fails the build below 7 days.
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]

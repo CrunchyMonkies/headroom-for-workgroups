@@ -393,14 +393,34 @@ write_env_file() {
 
     if [ "$SKIP_HEADROOM" -eq 0 ]; then
       echo "# ---- Headroom (shared compression proxy) ----"
-      echo "export ANTHROPIC_BASE_URL=$HEADROOM_URL"
-      echo "export OPENAI_BASE_URL=$HEADROOM_URL/v1"
       token_line
       echo 'export ANTHROPIC_CUSTOM_HEADERS="X-Headroom-Proxy-Token: $HEADROOM_PROXY_TOKEN"'
       echo
       echo "# Your own provider key is NOT set here and does not change. The proxy"
       echo "# holds no provider credentials — it forwards whatever key your client"
       echo "# sends. Keep ANTHROPIC_API_KEY / OPENAI_API_KEY exactly as they were."
+      echo
+      echo "# Routing is enabled only for an API-key client, because that is the"
+      echo "# only kind the proxy can admit. Its token check reads Authorization"
+      echo "# first and ignores X-Headroom-Proxy-Token whenever Authorization is"
+      echo "# present — so a client sending its own bearer credential is rejected"
+      echo "# with 'unauthorized' even though it supplied a perfectly valid proxy"
+      echo "# token. A subscription/OAuth login to Claude Code is exactly that"
+      echo "# case, and there is no header left to move either credential into."
+      echo "#"
+      echo "# Exporting ANTHROPIC_BASE_URL unconditionally would therefore break"
+      echo "# such a client on its next launch, having worked before. Clients that"
+      echo "# authenticate with x-api-key are unaffected and route normally."
+      echo "if [ -n \"\${ANTHROPIC_API_KEY:-}\" ]; then"
+      echo "  export ANTHROPIC_BASE_URL=$HEADROOM_URL"
+      echo "fi"
+      echo "if [ -n \"\${OPENAI_API_KEY:-}\" ]; then"
+      echo "  export OPENAI_BASE_URL=$HEADROOM_URL/v1"
+      echo "fi"
+      echo
+      echo "# Force it on regardless (an API-key client the variables above cannot"
+      echo "# see, for instance):"
+      echo "#   export ANTHROPIC_BASE_URL=$HEADROOM_URL"
       echo
     fi
 

@@ -228,6 +228,45 @@ Check whether your client is actually sending the header. Some clients drop
 [04-connect-cli-to-server.md](04-connect-cli-to-server.md#verify) isolates
 this.
 
+### `unauthorized` with a valid proxy token — subscription/OAuth clients
+
+The proxy's token check reads `Authorization` first and **ignores
+`X-Headroom-Proxy-Token` whenever `Authorization` is present**. A client that
+authenticates with its own bearer credential is therefore rejected even when it
+supplied a perfectly good proxy token, because the proxy tests the *client's*
+bearer against the proxy token and finds it doesn't match:
+
+```
+event=proxy_auth_rejected path=/v1/messages reason=bad_token
+```
+
+Reproduce it against your own deployment — the third line is the failure:
+
+```sh
+U=https://headroom.example.com/v1/messages
+curl -s -XPOST -d '{}' -H "X-Headroom-Proxy-Token: $T" $U                              # ok
+curl -s -XPOST -d '{}' -H "X-Headroom-Proxy-Token: $T" -H "x-api-key: $KEY" $U         # ok
+curl -s -XPOST -d '{}' -H "X-Headroom-Proxy-Token: $T" -H "Authorization: Bearer x" $U # unauthorized
+```
+
+**What this rules out.** Clients authenticating with `x-api-key` route
+normally. Clients authenticating with a bearer token cannot use the proxy at
+all — and there is no fix on the client side, because the two credentials
+cannot share the one `Authorization` slot and there is no other header the
+proxy will read. **Claude Code logged in with a Claude subscription is exactly
+this case**; with `ANTHROPIC_API_KEY` set it is not.
+
+That is why `install.sh` exports `ANTHROPIC_BASE_URL` only when
+`ANTHROPIC_API_KEY` is present. Exporting it unconditionally breaks a
+subscription login on its next launch, and the symptom — a tool that worked
+yesterday now failing to authenticate — points nowhere near a proxy someone
+else installed. Override it by exporting the variable yourself, after the
+sourced `env.sh`.
+
+Two smaller consequences of a custom `ANTHROPIC_BASE_URL`, independent of this:
+Claude Code disables `/remote-control` and gates the 1M-context window. Both are
+client-side and not something the proxy can restore.
+
 ### Requests are cut off mid-response
 
 The ingress timeout. Model responses stream for minutes and most controllers

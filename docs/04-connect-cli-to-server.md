@@ -51,6 +51,17 @@ config.** Keep `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` exactly as they were: the
 proxy forwards whatever key your client sends upstream, and holds none of its
 own.
 
+> **Your client must authenticate with an API key, not a bearer token.** The
+> proxy's token check reads `Authorization` first and ignores
+> `X-Headroom-Proxy-Token` whenever `Authorization` is present, so a client
+> sending its own bearer credential is rejected with `unauthorized` however
+> valid its proxy token. `x-api-key` clients are unaffected. **Claude Code
+> logged in with a Claude subscription is a bearer client and cannot use the
+> proxy**; the same Claude Code with `ANTHROPIC_API_KEY` set can. This is why
+> `install.sh` exports `ANTHROPIC_BASE_URL` only when that key is present —
+> details in
+> [07-troubleshooting.md](07-troubleshooting.md#unauthorized-with-a-valid-proxy-token--subscriptionoauth-clients).
+
 If your client cannot set a custom header, the token also works as a standard
 bearer credential:
 

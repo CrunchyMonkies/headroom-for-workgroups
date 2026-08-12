@@ -202,6 +202,12 @@ points at the image, and nothing references an unpublished chart. Re-run the
   package as private. Make `charts/*` and `headroom` public in the package
   settings, or consumers need a token to `helm install`.
 
+  There is no API for this — it is a UI-only setting, at
+  `github.com/orgs/<org>/packages` → the package → *Package settings* →
+  *Change visibility*. So the first release of any new chart will always
+  publish it private; the `Anonymous pull works` step in the release workflow
+  warns when that is still the case, which is why it is `continue-on-error`.
+
 ---
 
 ## Verifying a release as a consumer

@@ -311,16 +311,39 @@ jobs:
           for chart in headroom ix workgroup; do
             helm push "dist/${chart}-${VERSION}.tgz" "$OCI_REPO"
           done
-          helm registry logout ghcr.io
 
+      # Is the artefact intact? Authenticated on purpose — this asks whether
+      # what came back out of the registry still renders, which has nothing to
+      # do with who may read it. The two questions were one step in v0.1.0, and
+      # a private-by-default new package failed the release on the ACL while
+      # the chart itself was fine.
       - name: Install from the published chart
         if: needs.verify.outputs.publish == 'true'
         run: |
           set -euo pipefail
-          # A round-trip check: pull what was just pushed and render it. Catches
-          # a broken package before anyone else finds it.
           helm template wg "${OCI_REPO}/workgroup" --version "$VERSION" >/dev/null
           echo "[ok] ${OCI_REPO}/workgroup:${VERSION} pulls and renders"
+
+      # Can a stranger read it? Advisory: GHCR creates a package private on its
+      # first push, and visibility is a UI-only setting — there is no API for
+      # it, so the first release of any new chart necessarily fails this until
+      # someone flips it. Loud, not fatal.
+      - name: Anonymous pull works
+        if: needs.verify.outputs.publish == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          helm registry logout ghcr.io 2>/dev/null || true
+          if helm pull "${OCI_REPO}/workgroup" --version "$VERSION" -d /tmp >/dev/null 2>&1; then
+            echo "[ok] anonymous pull works — consumers need no credentials"
+          else
+            echo "::warning::${OCI_REPO}/workgroup:${VERSION} is not anonymously pullable."
+            echo "The package is private. Consumers — including any cluster"
+            echo "pulling this chart — will get a 401 until it is made public at"
+            echo "https://github.com/orgs/${GITHUB_REPOSITORY_OWNER}/packages"
+            echo "-> charts/workgroup -> Package settings -> Change visibility."
+            echo "Same for charts/headroom, charts/ix and the headroom image."
+          fi
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

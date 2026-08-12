@@ -162,18 +162,22 @@ headroom:
 ix:
   expose: { mode: gateway }
   auth:
-    mode: oauth2Proxy
-    oauth2Proxy:
-      existingSecret: ix-oidc
-      oidcIssuerUrl: https://idp.example.com
+    mode: none
+    acknowledgeUnauthenticated: true   # guarded by a SecurityPolicy, see below
 ```
 
 The Headroom HTTPRoute sets `timeouts.request: 0s` (no limit) for the same
 streaming reason. Ix uses 900s.
 
-Note: `auth.mode: basic` for Ix works through ingress-controller annotations
-and has **no Gateway API equivalent**. Combining the two is refused at template
-time; use `oauth2Proxy` with `gateway`.
+Headroom needs nothing further: it checks `HEADROOM_PROXY_TOKEN` on every
+request itself, and leaves `/readyz` exempt so a monitor can still reach it.
+
+Ix has no authentication of its own, and neither chart-provided mode helps here:
+`auth.mode: basic` is implemented as ingress-controller annotations with **no
+Gateway API equivalent** (combining the two is refused at template time), and
+`oauth2Proxy` is a browser redirect the `ix` CLI cannot complete. Guard the
+route by source address instead — see
+[Restricting by source address](#restricting-by-source-address-instead).
 
 ### TLS
 
@@ -353,6 +357,16 @@ does; the root password comes from a Secret in every configuration.
 
 ### The auth modes
 
+> **Read this before choosing one.** The `ix` CLI cannot send credentials of any
+> kind — no `Authorization` header, no token, no `.netrc`, and the runtime
+> rejects `https://user:pass@host` outright. Every mode below therefore breaks
+> the CLI, not just secures it. They exist for deployments where Ix is reached
+> only by something you control (a service, a proxy you wrote, a browser UI).
+> If developers are going to run `ix map` against this, see
+> [Restricting by source address](#restricting-by-source-address-instead)
+> below. The full reasoning is in
+> [04-connect-cli-to-server.md](04-connect-cli-to-server.md#the-ix-cli-cannot-authenticate).
+
 **`basic`** — HTTP basic auth via ingress-controller annotations. Cheapest to
 set up, ingress-only.
 
@@ -389,9 +403,59 @@ ix:
       emailDomain: example.com
 ```
 
-The sidecar runs with `--skip-jwt-bearer-tokens=true`, because the `ix` CLI is
-not a browser and cannot complete an interactive redirect — it presents a
-bearer token instead.
+The sidecar runs with `--skip-jwt-bearer-tokens=true` so that a caller holding a
+valid JWT can pass straight through without the interactive redirect. That is
+for machine callers you write yourself; the `ix` CLI cannot use it, because it
+cannot set a header.
+
+### Restricting by source address instead
+
+This is the only arrangement that leaves the CLI working. Expose Ix with
+`auth.mode: none` plus `acknowledgeUnauthenticated: true`, and put a
+source-address rule on the route. With Envoy Gateway:
+
+```yaml
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: ix-allow-lan
+  namespace: workgroup
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: wg-ix          # <release>-ix — must track the release name
+  authorization:
+    defaultAction: Deny
+    rules:
+      - name: lan
+        action: Allow
+        principal:
+          clientCIDRs:
+            - 10.0.0.0/8
+```
+
+`acknowledgeUnauthenticated: true` then means "the guard's intent is met
+elsewhere", not "unauthenticated is fine". Two conditions have to hold or the
+rule silently passes everything:
+
+- The gateway's LoadBalancer Service must be `externalTrafficPolicy: Local`.
+  Under the `Cluster` default every request is SNAT'd to a node address, so a
+  node-range CIDR matches unconditionally and the policy looks like it is
+  working.
+- Do not configure `clientIPDetection` / XFF trust on the Gateway unless you
+  control everything upstream of it; otherwise the matched address comes from a
+  header the client can set.
+
+Confirm the policy actually attached — a typo in `targetRefs.name` detaches it
+without error and leaves the API open:
+
+```sh
+kubectl -n workgroup get securitypolicy ix-allow-lan -o jsonpath='{.status}'
+```
+
+Be clear about what this buys: a perimeter, not a credential. Anyone inside the
+allowed range can read and write the whole codebase graph.
 
 **`none`** — only sensible with `expose.mode: none`. Attempting to expose it
 anyway is refused:

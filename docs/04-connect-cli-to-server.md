@@ -136,9 +136,36 @@ ix status
 ix doctor
 ```
 
-`ix status` should report the configured endpoint as reachable. If the backend
-sits behind basic auth, put the credentials in the URL or configure your
-client's netrc — `ix status` follows standard HTTP semantics.
+`ix status` should report the configured endpoint as reachable.
+
+### The Ix CLI cannot authenticate
+
+There is no way to make `ix` send credentials. Its API client builds every
+request as `fetch(\`${endpoint}/v1/...\`)` with a single `Content-Type` header —
+no `Authorization`, no token option, no header option, and `~/.ix/config.yaml`
+accepts only `endpoint` and `format`. It does not read `.netrc`.
+
+Nor can you smuggle credentials into the endpoint. `https://user:pass@host` is
+rejected by the runtime before a packet leaves the machine:
+
+```
+Request cannot be constructed from a URL that includes credentials
+```
+
+That is the WHATWG fetch specification, not an Ix bug, so it will not be worked
+around by a patch here.
+
+The consequence for deployment: **do not put an authentication layer in front
+of the Ix route** — not `auth.mode: basic`, not an Envoy `SecurityPolicy` with
+`basicAuth`, not an oauth2-proxy. Any of them turns every `ix` command into a
+401, `ix map` as surely as `ix status`.
+
+Protect it by reachability instead. Publish it on an address that is not
+routable from the internet, and narrow it further with a source-address rule —
+see the `SecurityPolicy` example using `authorization` / `principal.clientCIDRs`
+in [02-install-server-k8s.md](02-install-server-k8s.md). That is a perimeter,
+not a credential: everyone who can reach the address can read and write the
+graph. Deploy Ix accordingly, or not at all.
 
 ### Do not start the local backend
 

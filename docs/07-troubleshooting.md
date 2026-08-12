@@ -129,6 +129,72 @@ kubectl -n workgroup delete pod -l app.kubernetes.io/component=proxy \
   --field-selector status.phase=Running
 ```
 
+### The proxy is `OOMKilled` on a node that is not out of memory
+
+```
+Last State: Terminated   Reason: OOMKilled   Exit Code: 137
+```
+
+Check whether the kernel — not the container's own limit — did the killing:
+
+```sh
+kubectl get events -A --field-selector reason=SystemOOM
+```
+
+If that lists other victims on the same node (`calico-node`, `cadvisor`, and
+whatever else is unlucky), the node is oversubscribed and the proxy is
+collateral. Its default `resources` request 512Mi and cap at 4Gi, so it is
+Burstable with a wide burst window — which makes it a prime candidate for the
+kernel's OOM killer on a contended node, regardless of how much it is actually
+using.
+
+The reason it cannot simply move is the workspace PVC. On local or
+topology-bound storage the bound PV carries a node affinity, so the proxy is
+pinned to whichever node that volume lives on — permanently, and independently
+of where there is now room:
+
+```sh
+kubectl get pv "$(kubectl -n workgroup get pvc wg-headroom-workspace \
+  -o jsonpath='{.spec.volumeName}')" -o jsonpath='{.spec.nodeAffinity}'
+```
+
+Compare against real capacity (`kubectl describe node <n> | grep -A5 'Allocated
+resources'`). If the pinned node is the full one, deleting the claim is the fix
+— with `WaitForFirstConsumer` it re-binds wherever the pod actually schedules:
+
+```sh
+kubectl -n workgroup scale deploy/wg-headroom --replicas=0
+kubectl -n workgroup delete pvc wg-headroom-workspace
+helm upgrade --install wg oci://ghcr.io/crunchymonkies/charts/workgroup \
+  --version <same version> -n workgroup --reuse-values
+kubectl -n workgroup scale deploy/wg-headroom --replicas=1
+```
+
+**The upgrade in the middle is not optional.** Unlike the Qdrant, Neo4j and
+ArangoDB claims — which are StatefulSet `volumeClaimTemplates` and are recreated
+automatically — the workspace claim is an ordinary chart resource. Delete it and
+nothing brings it back on its own: the proxy sits `Pending` on
+`persistentvolumeclaim "wg-headroom-workspace" not found` indefinitely, which
+looks like a scheduling problem and is not one. Re-running the release recreates
+it, and `WaitForFirstConsumer` then binds it wherever the pod lands.
+
+Under the RKE2/k3s `HelmChart` CRD there is no `helm` binary to run, so force
+helm-controller to reconcile by deleting its completed job instead:
+
+```sh
+kubectl -n kube-system delete job helm-install-<helmchart-name>
+```
+
+**That volume is not empty.** It holds the savings/compression history, the
+proxy log, and — with `memory.enabled=false` — the entire local SQLite memory
+store. Deleting it is cheap on a fresh install and lossy on an established one;
+with the `qdrant-neo4j` backend the recall corpus lives in Qdrant and Neo4j, so
+only the history and logs are lost. Back it up first if either matters.
+
+Pin it deliberately if the cluster has one node that should host this — set
+`nodeSelector` so the first bind lands there, rather than discovering months
+later that it landed somewhere full.
+
 ### `CrashLoopBackOff` with permission errors on `/home/nonroot/.headroom`
 
 The image runs as uid 1000 and needs `fsGroup: 1000` to write the PVC. The
@@ -273,8 +339,22 @@ Common causes, in the order they occur:
 1. **`IX_ENDPOINT` still points at localhost** while a port-forward has died.
 2. **The local Docker backend is running** and shadowing the remote one —
    `ix docker stop`.
-3. **The auth layer is rejecting you** — a basic-auth 401 reads as
-   "not reachable". `curl -v` shows the difference.
+3. **An auth layer is rejecting you.** A 401 or 403 surfaces as
+   "not reachable" — `curl -v "$IX_ENDPOINT/v1/health"` shows which it is, and
+   the same request with `-u user:pass` proves it is the auth layer rather than
+   the backend. There is no fix on the client side: the CLI cannot send
+   credentials at all, so the auth layer has to come off. See
+   [04-connect-cli-to-server.md](04-connect-cli-to-server.md#the-ix-cli-cannot-authenticate)
+   for why, and
+   [02-install-server-k8s.md](02-install-server-k8s.md#restricting-by-source-address-instead)
+   for what to protect the route with instead.
+
+   A 403 with an empty body from Envoy Gateway means a source-address rule
+   denied you — you are outside the allowed CIDRs (on a VPN that egresses
+   elsewhere, say):
+   ```sh
+   kubectl -n workgroup get securitypolicy -o yaml | grep -A4 clientCIDRs
+   ```
 4. **The memory-layer is not ready** because ArangoDB is not:
    ```sh
    kubectl -n workgroup get pods -l app.kubernetes.io/instance=wg

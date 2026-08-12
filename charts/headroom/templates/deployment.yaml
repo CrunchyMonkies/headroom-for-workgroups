@@ -1,0 +1,178 @@
+{{- include "headroom.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "headroom.fullname" . }}
+  labels:
+    {{- include "headroom.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "headroom.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: proxy
+  template:
+    metadata:
+      labels:
+        {{- include "headroom.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: proxy
+        {{- with .Values.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "headroom.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: proxy
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # The image ENTRYPOINT is ["headroom","proxy"]; these are its args.
+          # --memory has no env var upstream, so it must be passed as a flag.
+          args:
+            - --host
+            - "0.0.0.0"
+            - --port
+            - {{ .Values.service.port | quote }}
+            {{- if .Values.memory.enabled }}
+            - --memory
+            {{- end }}
+            {{- if .Values.stateless }}
+            - --stateless
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: HOME
+              value: /home/nonroot
+            - name: HEADROOM_HOST
+              value: "0.0.0.0"
+            - name: HEADROOM_PORT
+              value: {{ .Values.service.port | quote }}
+            - name: HEADROOM_WORKSPACE_DIR
+              value: /home/nonroot/.headroom
+            - name: HEADROOM_CONFIG_DIR
+              value: /home/nonroot/.headroom/config
+            {{- if not .Values.updateCheck }}
+            - name: HEADROOM_UPDATE_CHECK
+              value: "off"
+            {{- end }}
+            {{- if .Values.offline }}
+            - name: HEADROOM_OFFLINE
+              value: "1"
+            {{- end }}
+            {{- if .Values.stateless }}
+            - name: HEADROOM_STATELESS
+              value: "1"
+            {{- end }}
+            {{- if .Values.auth.enabled }}
+            - name: HEADROOM_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "headroom.authSecretName" . }}
+                  key: {{ include "headroom.authSecretKey" . }}
+            {{- end }}
+            {{- with .Values.corsOrigins }}
+            - name: HEADROOM_CORS_ORIGINS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.upstream.anthropicApiUrl }}
+            - name: ANTHROPIC_TARGET_API_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.upstream.openaiApiUrl }}
+            - name: OPENAI_TARGET_API_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.memory.enabled }}
+            # HEADROOM_MEMORY_BACKEND and HEADROOM_NEO4J_* are provided by
+            # patches/0001-headroom-neo4j-config-surface.patch.
+            - name: HEADROOM_MEMORY_BACKEND
+              value: "qdrant-neo4j"
+            - name: HEADROOM_MEMORY_TOP_K
+              value: {{ .Values.memory.topK | quote }}
+            - name: HEADROOM_QDRANT_URL
+              value: {{ include "headroom.qdrantUrl" . | quote }}
+            {{- if and .Values.memory.qdrant.external.enabled .Values.memory.qdrant.external.apiKeySecret }}
+            - name: HEADROOM_QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.memory.qdrant.external.apiKeySecret }}
+                  key: {{ .Values.memory.qdrant.external.apiKeySecretKey }}
+            {{- end }}
+            - name: HEADROOM_NEO4J_URI
+              value: {{ include "headroom.neo4jUri" . | quote }}
+            - name: HEADROOM_NEO4J_USER
+              value: {{ .Values.memory.neo4j.auth.username | quote }}
+            - name: HEADROOM_NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "headroom.neo4jSecretName" . }}
+                  key: {{ include "headroom.neo4jSecretKey" . }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # /livez and /readyz are the auth-exempt probe endpoints upstream
+          # guarantees. /health is NOT used: it echoes upstream URLs and config
+          # to loopback callers and is not a probe surface.
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: workspace
+              mountPath: /home/nonroot/.headroom
+      volumes:
+        - name: workspace
+          {{- if and .Values.persistence.enabled (not .Values.stateless) }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-workspace" (include "headroom.fullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

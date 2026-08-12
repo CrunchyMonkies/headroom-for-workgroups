@@ -1,0 +1,42 @@
+{{- if eq .Values.expose.mode "ingress" }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "ix.fullname" . }}
+  labels:
+    {{- include "ix.labels" . | nindent 4 }}
+  annotations:
+    # `ix map` pushes large graph patches in a single request.
+    nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "900"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "900"
+    {{- if eq .Values.auth.mode "basic" }}
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: {{ .Values.auth.basic.existingSecret | quote }}
+    nginx.ingress.kubernetes.io/auth-realm: "Ix memory-layer"
+    {{- end }}
+    {{- with .Values.expose.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with (include "ix.ingressClassName" .) }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.expose.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ include "ix.exposeHost" . | quote }}
+      secretName: {{ include "ix.tlsSecretName" . }}
+  {{- end }}
+  rules:
+    - host: {{ include "ix.exposeHost" . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "ix.fullname" . }}
+                port:
+                  name: http
+{{- end }}

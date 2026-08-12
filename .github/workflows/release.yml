@@ -1,0 +1,423 @@
+name: Release
+
+# Tag → artefacts. See docs/08-releasing.md for the human procedure.
+#
+#   ghcr.io/<owner>/headroom:<version>              patched Headroom image
+#   ghcr.io/<owner>/headroom:<upstream-sha>-neo4j
+#   ghcr.io/<owner>/headroom:latest
+#   ghcr.io/<owner>/charts/{headroom,ix,workgroup}:<version>
+#   GitHub Release with the chart .tgz files and both installers
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and verify everything, publish nothing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # arm64 needs QEMU emulation, and this image compiles Python ML wheels — the
+  # emulated build takes the better part of an hour. Kubernetes nodes are
+  # overwhelmingly amd64 and this is a server image, so amd64 only by default.
+  # To add arm64: append it here and add docker/setup-qemu-action before the
+  # build steps.
+  IMAGE_PLATFORMS: linux/amd64
+
+jobs:
+  # ── Nothing is published unless everything the CI gate checks still holds ──
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+      owner: ${{ steps.v.outputs.owner }}
+      upstream_repo: ${{ steps.v.outputs.upstream_repo }}
+      upstream_commit: ${{ steps.v.outputs.upstream_commit }}
+      upstream_short: ${{ steps.v.outputs.upstream_short }}
+      patch_sha256: ${{ steps.v.outputs.patch_sha256 }}
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-helm
+
+      - id: v
+        name: Resolve version and publish mode
+        env:
+          # A tag push always publishes. workflow_dispatch publishes only when
+          # dry_run is explicitly false, so the accident-prone direction is the
+          # safe one.
+          REF_NAME: ${{ github.ref_name }}
+          IS_TAG: ${{ github.ref_type == 'tag' }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          # OCI references must be lowercase; the GitHub org name need not be.
+          owner_lc=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+
+          if [ "$IS_TAG" = "true" ]; then
+            version="${REF_NAME#v}"
+            publish=true
+            scripts/verify-versions.sh "$REF_NAME"
+          else
+            # No tag to take the version from — use what Chart.yaml says.
+            version=$(grep -m1 '^version:' charts/workgroup/Chart.yaml | awk '{print $2}')
+            publish=$([ "$DRY_RUN" = "false" ] && echo true || echo false)
+            scripts/verify-versions.sh
+          fi
+
+          # shellcheck source=/dev/null
+          . patches/upstream.env
+
+          {
+            echo "version=$version"
+            echo "publish=$publish"
+            echo "owner=$owner_lc"
+            echo "upstream_repo=$HEADROOM_REPO"
+            echo "upstream_commit=$HEADROOM_BASE_COMMIT"
+            echo "upstream_short=${HEADROOM_BASE_COMMIT:0:12}"
+            echo "patch_sha256=$(sha256sum "$HEADROOM_PATCH" | cut -d' ' -f1)"
+          } >>"$GITHUB_OUTPUT"
+
+          echo "version=$version publish=$publish owner=$owner_lc"
+
+      - name: Guard rails and render matrix
+        run: scripts/verify-charts.sh all
+
+      - name: Patch still applies to the pinned upstream commit
+        run: scripts/verify-patch.sh
+
+  # ── The patched Headroom image ────────────────────────────────────────────
+  image:
+    name: Patched Headroom image
+    needs: [verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/${{ needs.verify.outputs.owner }}/headroom
+      VERSION: ${{ needs.verify.outputs.version }}
+      UPSTREAM_SHORT: ${{ needs.verify.outputs.upstream_short }}
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout this repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: workgroup
+
+      - name: Checkout upstream Headroom at the pinned commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.verify.outputs.upstream_repo }}
+          ref: ${{ needs.verify.outputs.upstream_commit }}
+          persist-credentials: false
+          path: upstream
+
+      # Hard failure only. There is no "build it unpatched anyway" fallback:
+      # the resulting image would look identical and silently ignore Neo4j.
+      - name: Apply patches/0001
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          git apply --3way "$GITHUB_WORKSPACE/workgroup/patches/0001-headroom-neo4j-config-surface.patch"
+          git --no-pager diff --stat HEAD
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      # Build amd64 locally first so the patch can be verified in the actual
+      # artefact before anything is pushed. The multi-platform push below reuses
+      # this cache, so it costs one build, not two.
+      - name: Build for verification
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: upstream
+          load: true
+          tags: headroom-verify:local
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image's ENTRYPOINT is ["headroom","proxy"], so this runs
+      # `headroom proxy --help`. If the patch did not make it into the layers,
+      # these flags do not exist and the release stops here.
+      - name: Verify the patch is live in the image
+        run: |
+          set -euo pipefail
+          out=$(docker run --rm headroom-verify:local --help)
+          for flag in --memory-backend --memory-neo4j-uri --memory-neo4j-user --memory-neo4j-password; do
+            printf '%s' "$out" | grep -q -- "$flag" || {
+              echo "FAIL: $flag missing — the built image is not patched"; exit 1
+            }
+            echo "  [ok] $flag"
+          done
+
+      - name: Log in to ghcr.io
+        if: needs.verify.outputs.publish == 'true'
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: upstream
+          platforms: ${{ env.IMAGE_PLATFORMS }}
+          push: ${{ needs.verify.outputs.publish == 'true' }}
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+            ${{ env.IMAGE }}:${{ env.UPSTREAM_SHORT }}-neo4j
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Provenance for anyone auditing what this image actually is: upstream
+          # at a named commit, plus one patch identified by content hash.
+          labels: |
+            org.opencontainers.image.title=headroom (patched)
+            org.opencontainers.image.description=Upstream Headroom plus patches/0001-headroom-neo4j-config-surface.patch
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.headroom-for-workgroups.upstream.repo=${{ needs.verify.outputs.upstream_repo }}
+            io.headroom-for-workgroups.upstream.commit=${{ needs.verify.outputs.upstream_commit }}
+            io.headroom-for-workgroups.patch.sha256=${{ needs.verify.outputs.patch_sha256 }}
+
+      # Keyless signed provenance bound to the digest. Verify with:
+      #   gh attestation verify oci://<image>@<digest> -R <owner>/<repo>
+      #
+      # continue-on-error because attestations on a *private* repository need a
+      # paid GitHub plan; this org is on the free plan, so the step 403s. That is
+      # a plan limitation, not a bad build — the image is already published and
+      # verified by this point, and the OCI labels above name the exact upstream
+      # commit and patch hash regardless. Remove continue-on-error the moment
+      # this repo goes public or the org upgrades.
+      - name: Attest build provenance
+        continue-on-error: true
+        if: needs.verify.outputs.publish == 'true'
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          PUBLISHED: ${{ needs.verify.outputs.publish }}
+        run: |
+          {
+            echo "### Headroom image"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| published | \`$PUBLISHED\` |"
+            echo "| tags | \`$VERSION\`, \`$UPSTREAM_SHORT-neo4j\`, \`latest\` |"
+            echo "| digest | \`${DIGEST:-n/a}\` |"
+            echo "| platforms | \`$IMAGE_PLATFORMS\` |"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  # ── The three charts, as OCI artefacts ────────────────────────────────────
+  # Ordered after `image` so a published chart can never reference an image tag
+  # that does not exist: charts/headroom's default image.tag resolves to
+  # .Chart.AppVersion, which is this same version.
+  charts:
+    name: Charts
+    needs: [verify, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      OCI_REPO: oci://ghcr.io/${{ needs.verify.outputs.owner }}/charts
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-helm
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Vendors charts/headroom and charts/ix into charts/workgroup/charts/,
+          # so the umbrella tarball is self-contained and its file:// deps are
+          # never resolved by the consumer.
+          helm dependency update charts/workgroup
+          for chart in headroom ix workgroup; do
+            helm package "charts/$chart" --destination dist
+          done
+          ls -l dist
+
+      - name: Push to ghcr.io
+        if: needs.verify.outputs.publish == 'true'
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$GHCR_TOKEN" | helm registry login ghcr.io -u "$GHCR_USER" --password-stdin
+          for chart in headroom ix workgroup; do
+            helm push "dist/${chart}-${VERSION}.tgz" "$OCI_REPO"
+          done
+          helm registry logout ghcr.io
+
+      - name: Install from the published chart
+        if: needs.verify.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          # A round-trip check: pull what was just pushed and render it. Catches
+          # a broken package before anyone else finds it.
+          helm template wg "${OCI_REPO}/workgroup" --version "$VERSION" >/dev/null
+          echo "[ok] ${OCI_REPO}/workgroup:${VERSION} pulls and renders"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: charts
+          path: dist/*.tgz
+          if-no-files-found: error
+
+  # ── GitHub Release ────────────────────────────────────────────────────────
+  release:
+    name: GitHub Release
+    needs: [verify, charts]
+    if: needs.verify.outputs.publish == 'true' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      OWNER: ${{ needs.verify.outputs.owner }}
+      UPSTREAM_SHORT: ${{ needs.verify.outputs.upstream_short }}
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # need tag history for the changelog
+          persist-credentials: false
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: charts
+          path: dist
+
+      - name: Assemble release assets
+        run: |
+          set -euo pipefail
+          cp install.sh install.ps1 dist/
+          (cd dist && sha256sum ./* > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Write release notes
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          prev=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+
+          {
+            echo "## Install the servers"
+            echo
+            echo '```sh'
+            echo "helm install wg oci://ghcr.io/${OWNER}/charts/workgroup --version ${VERSION} \\"
+            echo "  -n workgroup --create-namespace"
+            echo '```'
+            echo
+            echo "## Install the clients"
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://raw.githubusercontent.com/${REPO}/${TAG}/install.sh | bash -s -- \\"
+            echo "  --headroom-url https://headroom.example.com \\"
+            echo "  --ix-url https://ix.example.com --token-file ./token"
+            echo '```'
+            echo
+            # Not `irm ... | iex`: the script takes parameters, and a piped
+            # script block has no way to receive them.
+            echo '```powershell'
+            echo "irm https://raw.githubusercontent.com/${REPO}/${TAG}/install.ps1 -OutFile install.ps1"
+            # printf, not echo: the Windows path below contains a backslash
+            # escape that some shells' echo would eat.
+            printf '%s\n' './install.ps1 -HeadroomUrl https://headroom.example.com `'
+            printf '%s\n' '              -IxUrl https://ix.example.com -TokenFile .\token'
+            echo '```'
+            echo
+            echo "## Artefacts"
+            echo
+            echo "| Artefact | Reference |"
+            echo "| --- | --- |"
+            for chart in headroom ix workgroup; do
+              echo "| chart \`${chart}\` | \`oci://ghcr.io/${OWNER}/charts/${chart}:${VERSION}\` |"
+            done
+            echo "| patched Headroom image | \`ghcr.io/${OWNER}/headroom:${VERSION}\` |"
+            echo "| | also \`:${UPSTREAM_SHORT}-neo4j\` and \`:latest\` |"
+            echo
+            echo "The image is upstream Headroom at commit \`${UPSTREAM_SHORT}\` plus"
+            echo "\`patches/0001-headroom-neo4j-config-surface.patch\`, which is what makes"
+            echo "\`memory.enabled: true\` reachable. Which upstream commit and which"
+            echo "patch went in is recorded on the image itself:"
+            echo
+            echo '```sh'
+            echo "docker inspect ghcr.io/${OWNER}/headroom:${VERSION} \\"
+            echo "  --format '{{json .Config.Labels}}' | jq"
+            echo
+            echo "# Signed build provenance, when the repo's plan supports attestations:"
+            echo "gh attestation verify oci://ghcr.io/${OWNER}/headroom:${VERSION} -R ${REPO}"
+            echo '```'
+            echo
+
+            if [ -n "$prev" ]; then
+              echo "## Changes since ${prev}"
+              echo
+              git log --no-merges --pretty='- %s (%h)' "${prev}..${TAG}"
+            else
+              echo "## Changes"
+              echo
+              echo "First release."
+            fi
+          } > release-notes.md
+
+          cat release-notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file release-notes.md \
+            --verify-tag \
+            dist/*.tgz dist/install.sh dist/install.ps1 dist/SHA256SUMS

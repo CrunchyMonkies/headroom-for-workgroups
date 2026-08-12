@@ -1,0 +1,121 @@
+# Default values for the ix chart.
+
+nameOverride: ""
+fullnameOverride: ""
+
+memoryLayer:
+  image:
+    repository: ghcr.io/ix-infrastructure/ix-memory-layer
+    tag: ""          # defaults to .Chart.AppVersion
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+imagePullSecrets: []
+
+# IMPORTANT: the Ix memory-layer API has NO built-in authentication. Upstream
+# binds it to localhost for exactly that reason. It is fully write-capable:
+# anything that can reach port 8090 can read or destroy the graph.
+#
+# The chart therefore defaults to expose.mode=none, and refuses to render an
+# Ingress/HTTPRoute unless an auth layer is configured (or you explicitly
+# acknowledge the risk).
+auth:
+  # none       - no auth layer (only sensible with expose.mode=none)
+  # basic      - HTTP basic auth via ingress-controller annotations
+  #              (ingress mode only; the Gateway API has no basic-auth filter)
+  # oauth2Proxy - an oauth2-proxy sidecar in front of the API
+  #              (works with both ingress and gateway)
+  mode: none
+  acknowledgeUnauthenticated: false
+
+  basic:
+    # Secret in the release namespace containing an htpasswd-format "auth" key.
+    #   htpasswd -c auth alice && kubectl create secret generic ix-basic-auth --from-file=auth
+    existingSecret: ""
+
+  oauth2Proxy:
+    image:
+      repository: quay.io/oauth2-proxy/oauth2-proxy
+      tag: v7.7.1
+      pullPolicy: IfNotPresent
+    provider: oidc
+    oidcIssuerUrl: ""
+    emailDomain: "*"
+    # Secret providing: client-id, client-secret, cookie-secret
+    existingSecret: ""
+    extraArgs: []
+    resources: {}
+
+expose:
+  mode: none       # none | ingress | gateway
+  host: ""
+  # Used only when host is empty and the workgroup umbrella supplies
+  # global.expose.domain — the host becomes "<subdomain>.<domain>".
+  subdomain: ix
+  ingress:
+    className: ""  # empty => global.expose.ingressClassName, else "nginx"
+    annotations: {}
+    tls:
+      enabled: true
+      # empty => global.expose.tlsSecretName, else "<fullname>-tls"
+      secretName: ""
+  gateway:
+    parentRefs: []
+    hostnames: []
+
+service:
+  type: ClusterIP
+  port: 8090
+  annotations: {}
+
+arangodb:
+  enabled: true
+  image:
+    repository: arangodb
+    tag: "3.12"
+    pullPolicy: IfNotPresent
+  # Tiny image used by the memory-layer's init container to wait for Arango.
+  waitImage: busybox:1.37
+  database: ix_memory
+  username: root
+  # Empty => generated on install and preserved across upgrades.
+  # Upstream compose runs Arango with ARANGO_NO_AUTH=1; this chart never does.
+  password: ""
+  existingSecret: ""
+  existingSecretKey: arango-password
+  persistence:
+    enabled: true
+    size: 50Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      memory: 4Gi
+  # Point at an existing ArangoDB instead of deploying one.
+  external:
+    enabled: false
+    host: ""
+    port: 8529
+
+networkPolicy:
+  enabled: true
+  # Empty => allow memory-layer ingress from anywhere in the cluster.
+  apiIngressFrom: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

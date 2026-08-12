@@ -1,0 +1,227 @@
+diff --git a/headroom/cli/proxy.py b/headroom/cli/proxy.py
+index 29e964a..c97c491 100644
+--- a/headroom/cli/proxy.py
++++ b/headroom/cli/proxy.py
+@@ -772,6 +772,41 @@ def dashboard(port: int, no_open: bool) -> None:
+     default=None,
+     help=("API key for hosted Qdrant (e.g. Qdrant Cloud). Also reads HEADROOM_QDRANT_API_KEY."),
+ )
++@click.option(
++    "--memory-backend",
++    type=click.Choice(["local", "qdrant-neo4j"], case_sensitive=False),
++    default=None,
++    envvar="HEADROOM_MEMORY_BACKEND",
++    help=(
++        "Memory storage backend. 'local' (default): SQLite on disk. 'qdrant-neo4j': "
++        "vector search in Qdrant plus a relationship graph in Neo4j — configure both with "
++        "--memory-qdrant-* and --memory-neo4j-*. Env: HEADROOM_MEMORY_BACKEND."
++    ),
++)
++@click.option(
++    "--memory-neo4j-uri",
++    default=None,
++    help=(
++        "Neo4j bolt URI for the qdrant-neo4j backend "
++        "(default: neo4j://localhost:7687, also reads HEADROOM_NEO4J_URI)"
++    ),
++)
++@click.option(
++    "--memory-neo4j-user",
++    default=None,
++    help=(
++        "Neo4j username for the qdrant-neo4j backend "
++        "(default: neo4j, also reads HEADROOM_NEO4J_USER)"
++    ),
++)
++@click.option(
++    "--memory-neo4j-password",
++    default=None,
++    help=(
++        "Neo4j password for the qdrant-neo4j backend. Prefer HEADROOM_NEO4J_PASSWORD over "
++        "the flag so the secret does not land in the process list."
++    ),
++)
+ # Traffic Learning (live pattern extraction from proxy traffic)
+ @click.option(
+     "--learn",
+@@ -992,6 +1027,10 @@ def proxy(
+     memory_qdrant_host: str | None,
+     memory_qdrant_port: int | None,
+     memory_qdrant_api_key: str | None,
++    memory_backend: str | None,
++    memory_neo4j_uri: str | None,
++    memory_neo4j_user: str | None,
++    memory_neo4j_password: str | None,
+     learn: bool,
+     no_learn: bool,
+     min_evidence: int | None,
+@@ -1182,6 +1221,21 @@ def proxy(
+     if memory_qdrant_api_key is not None:
+         qdrant_overrides["memory_qdrant_api_key"] = memory_qdrant_api_key
+ 
++    # Neo4j connection for the qdrant-neo4j backend. Same contract as the
++    # Qdrant overrides above: flags default to None so an omitted flag lets
++    # ProxyConfig's default_factory resolve HEADROOM_NEO4J_* instead.
++    neo4j_overrides: dict[str, Any] = {}
++    if memory_neo4j_uri is not None:
++        neo4j_overrides["memory_neo4j_uri"] = memory_neo4j_uri
++    if memory_neo4j_user is not None:
++        neo4j_overrides["memory_neo4j_user"] = memory_neo4j_user
++    if memory_neo4j_password is not None:
++        neo4j_overrides["memory_neo4j_password"] = memory_neo4j_password
++    if memory_backend is not None:
++        neo4j_overrides["memory_backend"] = cast(
++            Literal["local", "qdrant-neo4j"], memory_backend.lower()
++        )
++
+     config = ProxyConfig(
+         host=host,
+         port=port,
+@@ -1306,6 +1360,7 @@ def proxy(
+         memory_inject_context=not no_memory_context,
+         memory_top_k=memory_top_k,
+         **qdrant_overrides,
++        **neo4j_overrides,
+         # Traffic Learning: only with --learn, never with --no-learn
+         # Stateless mode disables learning (requires filesystem)
+         traffic_learning_enabled=False if is_stateless else (learn and not no_learn),
+diff --git a/headroom/memory/neo4j_env.py b/headroom/memory/neo4j_env.py
+new file mode 100644
+index 0000000..dea21b6
+--- /dev/null
++++ b/headroom/memory/neo4j_env.py
+@@ -0,0 +1,57 @@
++"""Resolve Neo4j connection settings from environment variables.
++
++Companion to :mod:`headroom.memory.qdrant_env`. The ``qdrant-neo4j`` memory
++backend needs both halves of its connection configured, but only the Qdrant
++half was reachable from the environment — the Neo4j half was hardcoded to
++``neo4j://localhost:7687``. That made the backend unusable from any
++containerised deployment (Docker Compose, Kubernetes), where Neo4j is a
++separate service rather than a loopback process.
++
++Supported environment variables:
++
++- ``HEADROOM_NEO4J_URI``       Bolt URI (e.g. ``neo4j://neo4j.svc:7687``).
++                                Default: ``neo4j://localhost:7687``.
++- ``HEADROOM_NEO4J_USER``      Username. Default: ``neo4j``.
++- ``HEADROOM_NEO4J_PASSWORD``  Password. Default: empty (the proxy logs a
++                                warning when the ``qdrant-neo4j`` backend is
++                                selected without one).
++
++Explicit constructor arguments and CLI flags always win over environment
++values; these only fill in dataclass defaults.
++"""
++
++from __future__ import annotations
++
++import os
++
++DEFAULT_NEO4J_URI = "neo4j://localhost:7687"
++DEFAULT_NEO4J_USER = "neo4j"
++
++
++def _strip_env(name: str) -> str | None:
++    """Return the trimmed env var value, or ``None`` if unset/empty."""
++    raw = os.environ.get(name)
++    if raw is None:
++        return None
++    stripped = raw.strip()
++    return stripped or None
++
++
++def neo4j_env_uri() -> str:
++    """Return ``HEADROOM_NEO4J_URI`` or the ``neo4j://localhost:7687`` default."""
++    return _strip_env("HEADROOM_NEO4J_URI") or DEFAULT_NEO4J_URI
++
++
++def neo4j_env_user() -> str:
++    """Return ``HEADROOM_NEO4J_USER`` or the ``neo4j`` default."""
++    return _strip_env("HEADROOM_NEO4J_USER") or DEFAULT_NEO4J_USER
++
++
++def neo4j_env_password() -> str:
++    """Return ``HEADROOM_NEO4J_PASSWORD`` or an empty string if unset.
++
++    Empty (rather than ``None``) keeps the ``ProxyConfig.memory_neo4j_password``
++    field a plain ``str``, so the existing "password is not set" startup warning
++    in the proxy continues to work unchanged.
++    """
++    return _strip_env("HEADROOM_NEO4J_PASSWORD") or ""
+diff --git a/headroom/proxy/models.py b/headroom/proxy/models.py
+index e44493b..1448fe6 100644
+--- a/headroom/proxy/models.py
++++ b/headroom/proxy/models.py
+@@ -7,11 +7,12 @@ Extracted from server.py to keep the codebase maintainable.
+ from __future__ import annotations
+ 
+ import logging
++import os
+ from dataclasses import InitVar, dataclass, field
+ from datetime import datetime
+-from typing import Any, Literal
++from typing import Any, Literal, cast
+ 
+-from headroom.memory import qdrant_env
++from headroom.memory import neo4j_env, qdrant_env
+ from headroom.providers.registry import ProviderApiOverrides
+ from headroom.proxy.model_router import ModelRouterConfig
+ 
+@@ -39,6 +40,32 @@ def _qdrant_env_port_or_default() -> int:
+         return qdrant_env.DEFAULT_QDRANT_PORT
+ 
+ 
++_MEMORY_BACKENDS = ("local", "qdrant-neo4j")
++
++
++def _memory_backend_from_env() -> Literal["local", "qdrant-neo4j"]:
++    """Resolve ``HEADROOM_MEMORY_BACKEND``, falling back to ``local``.
++
++    Fails soft for the same reason as :func:`_qdrant_env_port_or_default`: this
++    runs on every ``ProxyConfig()`` construction, so an unrecognised value must
++    not crash startup for a subsystem that is off by default.
++    """
++    raw = os.environ.get("HEADROOM_MEMORY_BACKEND")
++    if raw is None:
++        return "local"
++    candidate = raw.strip().lower()
++    if not candidate:
++        return "local"
++    if candidate not in _MEMORY_BACKENDS:
++        logger.warning(
++            "Ignoring invalid HEADROOM_MEMORY_BACKEND=%r; using 'local'. Expected one of %s.",
++            raw,
++            list(_MEMORY_BACKENDS),
++        )
++        return "local"
++    return cast('Literal["local", "qdrant-neo4j"]', candidate)
++
++
+ # =============================================================================
+ # Data Models
+ # =============================================================================
+@@ -372,7 +399,9 @@ class ProxyConfig:
+ 
+     # Memory System
+     memory_enabled: bool = False
+-    memory_backend: Literal["local", "qdrant-neo4j"] = "local"
++    memory_backend: Literal["local", "qdrant-neo4j"] = field(
++        default_factory=_memory_backend_from_env
++    )
+     memory_db_path: str = ""  # Empty = auto: {cwd}/.headroom/memory.db
+     # Per-project memory routing (GH #462). ``project`` (the new default)
+     # gives each resolved workspace its own SQLite DB so cross-project
+@@ -402,9 +431,10 @@ class ProxyConfig:
+     memory_qdrant_host: str = field(default_factory=qdrant_env.qdrant_env_host)
+     memory_qdrant_port: int = field(default_factory=_qdrant_env_port_or_default)
+     memory_qdrant_api_key: str | None = field(default_factory=qdrant_env.qdrant_env_api_key)
+-    memory_neo4j_uri: str = "neo4j://localhost:7687"
+-    memory_neo4j_user: str = "neo4j"
+-    memory_neo4j_password: str = ""
++    # Neo4j connection (defaults resolve from HEADROOM_NEO4J_* env vars)
++    memory_neo4j_uri: str = field(default_factory=neo4j_env.neo4j_env_uri)
++    memory_neo4j_user: str = field(default_factory=neo4j_env.neo4j_env_user)
++    memory_neo4j_password: str = field(default_factory=neo4j_env.neo4j_env_password)
+     memory_bridge_enabled: bool = False
+     memory_bridge_md_paths: list[str] = field(default_factory=list)
+     memory_bridge_md_format: str = "auto"

@@ -1,0 +1,52 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "headroom.fullname" . }}-proxy
+  labels:
+    {{- include "headroom.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "headroom.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: proxy
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: http
+          protocol: TCP
+      {{- with .Values.networkPolicy.proxyIngressFrom }}
+      # Empty `from` would mean "allow all"; this narrows it to the configured peers.
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if and .Values.memory.enabled (or (and .Values.memory.qdrant.enabled (not .Values.memory.qdrant.external.enabled)) (and .Values.memory.neo4j.enabled (not .Values.memory.neo4j.external.enabled))) }}
+---
+# Datastores are reachable only from the proxy pod, regardless of how the
+# proxy itself is exposed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "headroom.fullname" . }}-memory
+  labels:
+    {{- include "headroom.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: ["qdrant", "neo4j"]
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name | quote }}]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "headroom.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: proxy
+{{- end }}
+{{- end }}

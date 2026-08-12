@@ -1,0 +1,181 @@
+{{- include "ix.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ix.fullname" . }}
+  labels:
+    {{- include "ix.labels" . | nindent 4 }}
+    app.kubernetes.io/component: memory-layer
+spec:
+  replicas: {{ .Values.memoryLayer.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ix.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: memory-layer
+  template:
+    metadata:
+      labels:
+        {{- include "ix.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: memory-layer
+        {{- with .Values.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "ix.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.arangodb.enabled }}
+      initContainers:
+        # Compose expressed this as `depends_on: service_healthy`; wait for
+        # Arango to answer before the API starts querying it.
+        - name: wait-for-arangodb
+          image: {{ .Values.arangodb.waitImage | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              until wget -qO- "http://{{ include "ix.arangoHost" . }}:{{ include "ix.arangoPort" . }}/_api/version" >/dev/null 2>&1; do
+                echo "waiting for arangodb..."
+                sleep 3
+              done
+              echo "arangodb is up"
+      {{- end }}
+      containers:
+        - name: memory-layer
+          image: "{{ .Values.memoryLayer.image.repository }}:{{ .Values.memoryLayer.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.memoryLayer.image.pullPolicy }}
+          env:
+            - name: PORT
+              value: "8090"
+            - name: ARANGO_HOST
+              value: {{ include "ix.arangoHost" . | quote }}
+            - name: ARANGO_PORT
+              value: {{ include "ix.arangoPort" . | quote }}
+            - name: ARANGO_DATABASE
+              value: {{ .Values.arangodb.database | quote }}
+            - name: ARANGO_USER
+              value: {{ .Values.arangodb.username | quote }}
+            - name: ARANGO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ix.arangoSecretName" . }}
+                  key: {{ include "ix.arangoSecretKey" . }}
+          ports:
+            - name: http
+              containerPort: 8090
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.memoryLayer.resources | nindent 12 }}
+        {{- if eq (include "ix.oauth2ProxyEnabled" .) "true" }}
+        # The API itself is unauthenticated, so it stays on 127.0.0.1 from the
+        # Service's point of view: only this sidecar is exposed.
+        - name: oauth2-proxy
+          image: "{{ .Values.auth.oauth2Proxy.image.repository }}:{{ .Values.auth.oauth2Proxy.image.tag }}"
+          imagePullPolicy: {{ .Values.auth.oauth2Proxy.image.pullPolicy }}
+          args:
+            - --http-address=0.0.0.0:4180
+            - --upstream=http://127.0.0.1:8090
+            - --provider={{ .Values.auth.oauth2Proxy.provider }}
+            {{- with .Values.auth.oauth2Proxy.oidcIssuerUrl }}
+            - --oidc-issuer-url={{ . }}
+            {{- end }}
+            - --email-domain={{ .Values.auth.oauth2Proxy.emailDomain }}
+            - --skip-provider-button=true
+            # The `ix` CLI is not a browser: it cannot complete an interactive
+            # redirect, so bearer-token auth must be accepted too.
+            - --skip-jwt-bearer-tokens=true
+            {{- with .Values.auth.oauth2Proxy.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: OAUTH2_PROXY_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.oauth2Proxy.existingSecret }}
+                  key: client-id
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.oauth2Proxy.existingSecret }}
+                  key: client-secret
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.oauth2Proxy.existingSecret }}
+                  key: cookie-secret
+          ports:
+            - name: auth
+              containerPort: 4180
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: auth
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.auth.oauth2Proxy.resources | nindent 12 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ix.fullname" . }}
+  labels:
+    {{- include "ix.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: {{ include "ix.serviceTargetPort" . }}
+      protocol: TCP
+  selector:
+    {{- include "ix.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: memory-layer
+{{- if .Values.serviceAccount.create }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "ix.serviceAccountName" . }}
+  labels:
+    {{- include "ix.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: false
+{{- end }}

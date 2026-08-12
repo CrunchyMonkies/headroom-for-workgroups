@@ -1,0 +1,29 @@
+name: Setup Helm
+description: >-
+  Install a pinned Helm binary straight from get.helm.sh, checksum-verified.
+  Deliberately not a third-party action — this is three lines of curl and one
+  fewer supply-chain dependency to keep pinned.
+
+inputs:
+  version:
+    description: Helm version to install, e.g. v3.21.3
+    required: false
+    default: v4.2.3
+
+runs:
+  using: composite
+  steps:
+    - name: Install Helm ${{ inputs.version }}
+      shell: bash
+      env:
+        HELM_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        tarball="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+        cd "$(mktemp -d)"
+        curl -fsSLO "https://get.helm.sh/${tarball}"
+        curl -fsSLO "https://get.helm.sh/${tarball}.sha256sum"
+        sha256sum -c "${tarball}.sha256sum"
+        tar -xzf "$tarball" linux-amd64/helm
+        sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+        helm version

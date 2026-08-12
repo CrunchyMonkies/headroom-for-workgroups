@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # This repo ships Helm charts, shell/PowerShell installers and docs — no
+  # application package manager. The only ecosystem to keep current is the
+  # SHA-pinned Actions in .github/workflows and .github/actions.
+  #
+  # Not covered by Dependabot, and worth a manual look:
+  #   - the tool versions pinned inline in the workflows (helm, kubeconform,
+  #     gitleaks) — see the `env:` blocks
+  #   - HEADROOM_BASE_COMMIT in patches/upstream.env (CI's `patch` job tells you
+  #     when it has rotted)
+  #   - the datastore image tags in charts/*/values.yaml
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

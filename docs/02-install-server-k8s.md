@@ -1,0 +1,418 @@
+# 2. Install the servers on Kubernetes
+
+## Prerequisites
+
+- Kubernetes 1.27+
+- Helm 3.13+ (for `--dry-run=client`). Verified against Helm 4.0.
+- A default StorageClass supporting `ReadWriteOnce` (both charts use PVCs)
+- For `expose.mode: ingress` — an ingress controller. The chart's default
+  annotations are nginx-flavoured; other controllers work but you will want to
+  translate the timeout annotations (see [Exposure](#exposure)).
+- For `expose.mode: gateway` — the Gateway API CRDs
+  (`gateway.networking.k8s.io/v1`) and a Gateway to attach to. The charts check
+  for this and fail rendering with a clear message if it is absent.
+- For TLS — cert-manager, or a certificate Secret you create yourself.
+
+Check what you have:
+
+```sh
+kubectl get storageclass
+kubectl get ingressclass
+kubectl api-resources | grep gateway.networking
+```
+
+---
+
+## Install
+
+### Both services together (recommended)
+
+```sh
+helm install wg oci://ghcr.io/crunchymonkies/charts/workgroup --version 0.1.0 \
+  -n workgroup --create-namespace
+```
+
+Defaults: both services cluster-internal (`expose.mode: none`), Headroom
+authenticated with a generated token, Ix backed by an ArangoDB with a generated
+root password, NetworkPolicies on, Headroom semantic memory off.
+
+`helm show values oci://ghcr.io/crunchymonkies/charts/workgroup --version 0.1.0`
+prints the full values file without installing anything. Available versions are
+listed on the [releases page](https://github.com/CrunchyMonkies/headroom-for-workgroups/releases);
+the charts are published as OCI artefacts only, so there is no `helm repo add`
+step.
+
+### One at a time
+
+```sh
+helm install headroom oci://ghcr.io/crunchymonkies/charts/headroom --version 0.1.0 \
+  -n workgroup --create-namespace
+helm install ix       oci://ghcr.io/crunchymonkies/charts/ix       --version 0.1.0 \
+  -n workgroup
+```
+
+The standalone charts are self-contained — the umbrella adds nothing but shared
+hostname defaults.
+
+### From a clone
+
+Working from a checkout, or on a change you have not released yet:
+
+```sh
+helm dependency update charts/workgroup   # vendors the two local subcharts
+helm install wg charts/workgroup -n workgroup --create-namespace
+```
+
+`helm dependency update` is only needed for the umbrella, and only from a
+checkout — the published `workgroup` chart already carries both subcharts
+inside it.
+
+### Verify
+
+```sh
+kubectl -n workgroup get pods
+kubectl -n workgroup port-forward svc/wg-headroom 8787:8787 &
+curl -fsS http://127.0.0.1:8787/readyz
+
+kubectl -n workgroup port-forward svc/wg-ix 8090:8090 &
+curl -fsS http://127.0.0.1:8090/v1/health
+```
+
+Headroom's first start pulls compression models and can take a few minutes.
+The startup probe allows five minutes by default
+(`probes.startup.failureThreshold: 60` × 5s); the pod stays `0/1` until then,
+which is expected, not a failure.
+
+---
+
+## Exposure
+
+Both charts share one three-way toggle, so the umbrella can drive them
+together.
+
+```yaml
+expose:
+  mode: none          # none | ingress | gateway
+  host: ""
+  subdomain: headroom # used with the umbrella's global.expose.domain
+  ingress:
+    className: ""     # empty => global, else "nginx"
+    annotations: {}
+    tls:
+      enabled: true
+      secretName: ""  # empty => global, else "<release>-<chart>-tls"
+  gateway:
+    parentRefs: []    # [{name: my-gateway, namespace: gateway-system}]
+    hostnames: []     # empty => [host]
+```
+
+### `none` — cluster-internal (the default)
+
+ClusterIP only. Developers reach the services with `kubectl port-forward`.
+This is the lowest-risk starting point and is a perfectly reasonable permanent
+answer for a small team that already has cluster access — in particular,
+Headroom exempts loopback callers from its token, so a port-forwarded proxy
+needs no credential at all.
+
+### `ingress`
+
+```yaml
+# values-ingress.yaml
+global:
+  expose:
+    domain: dev.example.com
+    ingressClassName: nginx
+headroom:
+  expose: { mode: ingress }
+ix:
+  expose: { mode: ingress }
+  auth:
+    mode: basic
+    basic: { existingSecret: ix-basic-auth }
+```
+
+```sh
+helm upgrade --install wg oci://ghcr.io/crunchymonkies/charts/workgroup --version 0.1.0 \
+  -n workgroup -f values-ingress.yaml
+```
+
+That publishes `headroom.dev.example.com` and `ix.dev.example.com`.
+
+The Headroom Ingress carries streaming-friendly annotations by default —
+`proxy-read-timeout: 3600`, `proxy-send-timeout: 3600`, `proxy-body-size: 0`,
+`proxy-buffering: off`. Model responses stream for minutes and the usual
+60-second controller default cuts them off mid-completion. On a non-nginx
+controller you must set the equivalent yourself via
+`expose.ingress.annotations`.
+
+The Ix Ingress uses a 64 MB body limit and 900-second timeouts: `ix map` on a
+large repository commits one large patch in one long request.
+
+### `gateway`
+
+```yaml
+global:
+  expose:
+    domain: dev.example.com
+    gatewayParentRefs:
+      - name: public-gateway
+        namespace: gateway-system
+headroom:
+  expose: { mode: gateway }
+ix:
+  expose: { mode: gateway }
+  auth:
+    mode: oauth2Proxy
+    oauth2Proxy:
+      existingSecret: ix-oidc
+      oidcIssuerUrl: https://idp.example.com
+```
+
+The Headroom HTTPRoute sets `timeouts.request: 0s` (no limit) for the same
+streaming reason. Ix uses 900s.
+
+Note: `auth.mode: basic` for Ix works through ingress-controller annotations
+and has **no Gateway API equivalent**. Combining the two is refused at template
+time; use `oauth2Proxy` with `gateway`.
+
+### TLS
+
+With cert-manager, add the issuer annotation and let it fill the Secret the
+chart already names:
+
+```yaml
+headroom:
+  expose:
+    ingress:
+      annotations:
+        cert-manager.io/cluster-issuer: letsencrypt-prod
+```
+
+With a shared wildcard certificate you already hold, name it once:
+
+```yaml
+global:
+  expose:
+    tlsSecretName: wildcard-dev-example-com-tls
+```
+
+---
+
+## Headroom values reference
+
+The full annotated set is `charts/headroom/values.yaml`. The ones that matter:
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `image.repository` | `ghcr.io/crunchymonkies/headroom` | this repo's patched build — see below |
+| `image.tag` | `""` | empty ⇒ `.Chart.AppVersion`, which is the release version |
+| `auth.enabled` | `true` | sets `HEADROOM_PROXY_TOKEN` |
+| `auth.token` | `""` | empty ⇒ generated, then **preserved across upgrades** |
+| `auth.existingSecret` | `""` | for external secret managers |
+| `persistence.size` | `10Gi` | savings history, logs, local memory |
+| `stateless` | `false` | `HEADROOM_STATELESS=1`; required for `replicaCount > 1` |
+| `memory.enabled` | `false` | two StatefulSets and ~40Gi — see below |
+| `upstream.anthropicApiUrl` / `openaiApiUrl` | `""` | point at a gateway or Azure/Bedrock shim |
+| `updateCheck` | `false` | `HEADROOM_UPDATE_CHECK=off` |
+| `offline` | `false` | `HEADROOM_OFFLINE=1` for air-gapped clusters |
+| `corsOrigins` | `""` | `HEADROOM_CORS_ORIGINS` |
+| `extraEnv` / `extraEnvFrom` | `[]` | anything not modelled above |
+| `networkPolicy.proxyIngressFrom` | `[]` | empty ⇒ any pod may reach 8787 |
+
+### Reading the generated token
+
+```sh
+kubectl -n workgroup get secret wg-headroom-secrets \
+  -o jsonpath='{.data.proxy-token}' | base64 -d; echo
+```
+
+It is generated once and read back from the live Secret on every upgrade, so
+`helm upgrade` never silently rotates every developer's credential. To rotate
+deliberately, delete the Secret key or set `auth.token` explicitly.
+
+### The image
+
+The chart defaults to `ghcr.io/crunchymonkies/headroom`, built by this repo:
+upstream at the commit pinned in [`patches/upstream.env`](../patches/upstream.env)
+plus `patches/0001-headroom-neo4j-config-surface.patch`. The patch adds
+configuration surface and nothing else — with none of the new environment
+variables set, the container behaves exactly as upstream's does — but it is what
+makes `memory.enabled: true` reachable at all.
+
+To run upstream's published image instead:
+
+```yaml
+headroom:
+  image:
+    repository: ghcr.io/chopratejas/headroom
+    tag: latest
+```
+
+The chart will then refuse `memory.enabled: true`, which is the point:
+
+```
+headroom: memory.enabled=true needs an image built with
+patches/0001-headroom-neo4j-config-surface.patch, but image.repository is set
+to the published upstream image … memory would silently stay on local SQLite.
+```
+
+That is not conservatism — the stock image has no configuration surface for the
+Neo4j half of the `qdrant-neo4j` backend, so you would get a running Qdrant, a
+running Neo4j, and a memory subsystem quietly ignoring both. If upstream merges
+the patch, `memory.acknowledgeUnpatchedImage: true` overrides the guard.
+
+### Semantic memory (Qdrant + Neo4j)
+
+Off by default — it adds two StatefulSets and about 40Gi. On the default image
+it is a one-line change:
+
+```yaml
+headroom:
+  memory:
+    enabled: true
+```
+
+`memory.enabled=true` is incompatible with `stateless=true` (upstream disables
+memory when `HEADROOM_STATELESS` is set); the chart fails on that combination
+too.
+
+### Using managed datastores
+
+```yaml
+headroom:
+  memory:
+    enabled: true
+    qdrant:
+      enabled: false
+      external:
+        enabled: true
+        url: https://qdrant.example.com:6333
+        apiKeySecret: qdrant-api-key
+    neo4j:
+      enabled: false
+      external:
+        enabled: true
+        uri: neo4j+s://abcd.databases.neo4j.io
+      auth:
+        existingSecret: neo4j-creds
+```
+
+---
+
+## Ix values reference
+
+Full set in `charts/ix/values.yaml`.
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `auth.mode` | `none` | `none` \| `basic` \| `oauth2Proxy` |
+| `auth.acknowledgeUnauthenticated` | `false` | required to expose with `auth.mode: none` |
+| `arangodb.password` | `""` | empty ⇒ generated, preserved across upgrades |
+| `arangodb.database` | `ix_memory` | |
+| `arangodb.persistence.size` | `50Gi` | the graph grows with repo count × size |
+| `arangodb.external.*` | disabled | point at a managed ArangoDB |
+| `networkPolicy.apiIngressFrom` | `[]` | empty ⇒ any pod may reach the API |
+
+Upstream's compose file runs ArangoDB with `ARANGO_NO_AUTH=1`. This chart never
+does; the root password comes from a Secret in every configuration.
+
+### The auth modes
+
+**`basic`** — HTTP basic auth via ingress-controller annotations. Cheapest to
+set up, ingress-only.
+
+```sh
+htpasswd -c auth alice
+htpasswd auth bob
+kubectl -n workgroup create secret generic ix-basic-auth --from-file=auth
+```
+
+```yaml
+ix:
+  auth: { mode: basic, basic: { existingSecret: ix-basic-auth } }
+```
+
+**`oauth2Proxy`** — an oauth2-proxy sidecar in front of the API. The Service
+targets the sidecar port instead of the API port, so the API is never reachable
+except through it. Works with both `ingress` and `gateway`.
+
+```sh
+kubectl -n workgroup create secret generic ix-oidc \
+  --from-literal=client-id=... \
+  --from-literal=client-secret=... \
+  --from-literal=cookie-secret="$(openssl rand -base64 32 | head -c 32 | base64)"
+```
+
+```yaml
+ix:
+  auth:
+    mode: oauth2Proxy
+    oauth2Proxy:
+      existingSecret: ix-oidc
+      provider: oidc
+      oidcIssuerUrl: https://idp.example.com
+      emailDomain: example.com
+```
+
+The sidecar runs with `--skip-jwt-bearer-tokens=true`, because the `ix` CLI is
+not a browser and cannot complete an interactive redirect — it presents a
+bearer token instead.
+
+**`none`** — only sensible with `expose.mode: none`. Attempting to expose it
+anyway is refused:
+
+```
+ix: refusing to expose the memory-layer with auth.mode=none. The Ix API has
+no built-in authentication and is write-capable…
+```
+
+`auth.acknowledgeUnauthenticated: true` overrides it if you have decided that a
+private network makes it acceptable.
+
+---
+
+## Guard rails
+
+Both charts validate at template time so a misconfiguration fails at
+`helm install` rather than becoming a running-but-wrong deployment.
+
+| Condition | Chart |
+| --- | --- |
+| `expose.mode` / `auth.mode` not a known value | both |
+| exposed with no authentication | both |
+| `expose.mode: ingress` with no host | both |
+| `expose.mode: gateway` with no `parentRefs` | both |
+| `expose.mode: gateway` and Gateway API not installed | both |
+| `external.enabled` with no URL/URI/host | both |
+| `memory.enabled` on an unpatched image | headroom |
+| `memory.enabled` with `stateless: true` | headroom |
+| `auth.mode: basic` with `expose.mode: gateway` | ix |
+| `auth.mode` set but its Secret unnamed | ix |
+| neither in-chart nor external database | ix |
+
+Each has an explicit override where one makes sense
+(`acknowledgeUnauthenticated`, `acknowledgeUnpatchedImage`).
+
+---
+
+## Uninstall
+
+```sh
+helm uninstall wg -n workgroup
+```
+
+Data survives. The credential Secrets and Headroom's workspace PVC carry
+`helm.sh/resource-policy: keep`, and Kubernetes never garbage-collects the PVCs
+a StatefulSet's `volumeClaimTemplates` created (Qdrant, Neo4j, ArangoDB). So a
+reinstall with the same release name comes back with its data and its
+passwords intact.
+
+To discard everything:
+
+```sh
+kubectl -n workgroup delete pvc,secret -l app.kubernetes.io/instance=wg
+```
+
+Delete the Secrets and the PVCs **together**. Neo4j and ArangoDB persist their
+user accounts on disk: keeping a volume while dropping its password locks you
+out of the database on the next install.

@@ -1,0 +1,201 @@
+# Default values for the headroom chart.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # This repo's own build: upstream at patches/upstream.env's pinned commit plus
+  # patches/0001-headroom-neo4j-config-surface.patch, published by
+  # .github/workflows/release.yml. The patch only adds configuration surface —
+  # with none of the new env vars set the behaviour is upstream's exactly — but
+  # it is what makes `memory.enabled: true` reachable at all.
+  #
+  # To go back to the published upstream image, set:
+  #   repository: ghcr.io/chopratejas/headroom
+  # The chart then refuses `memory.enabled: true`, because that image has no way
+  # to be told about a Neo4j and would silently stay on local SQLite.
+  repository: ghcr.io/crunchymonkies/headroom
+  tag: ""            # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+replicaCount: 1
+
+# Inbound authentication.
+#
+# The proxy binds 0.0.0.0 in-cluster, and upstream only exempts loopback
+# callers from auth — so without a token every /v1/* route is reachable
+# unauthenticated from the whole pod network. The chart therefore sets
+# HEADROOM_PROXY_TOKEN by default.
+#
+# Leave `token` empty to have the chart generate one on first install; it is
+# preserved across `helm upgrade` (read back from the live Secret) so client
+# credentials are never silently rotated.
+auth:
+  enabled: true
+  token: ""
+  existingSecret: ""
+  existingSecretKey: proxy-token
+  # Only honoured when auth.enabled=false: required to expose an
+  # unauthenticated proxy through an Ingress/HTTPRoute.
+  acknowledgeUnauthenticated: false
+
+# How clients outside the cluster reach the proxy.
+#   none    - ClusterIP only (use `kubectl port-forward`)
+#   ingress - networking.k8s.io/v1 Ingress
+#   gateway - gateway.networking.k8s.io/v1 HTTPRoute
+expose:
+  mode: none
+  host: ""
+  # Used only when host is empty and the workgroup umbrella supplies
+  # global.expose.domain — the host becomes "<subdomain>.<domain>".
+  subdomain: headroom
+  ingress:
+    className: ""         # empty => global.expose.ingressClassName, else "nginx"
+    annotations: {}
+    tls:
+      enabled: true
+      # empty => global.expose.tlsSecretName, else "<fullname>-tls"
+      secretName: ""
+  gateway:
+    # e.g. [{name: my-gateway, namespace: gateway-system}]
+    parentRefs: []
+    hostnames: []
+
+service:
+  type: ClusterIP
+  port: 8787
+  annotations: {}
+
+# Workspace volume: dashboard/savings history, logs, local SQLite memory.
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  existingClaim: ""
+
+# Disable all filesystem writes (HEADROOM_STATELESS=1). Lets you scale the
+# proxy horizontally at the cost of local memory + savings history.
+# Implies persistence is unused.
+stateless: false
+
+# Semantic memory backend (Qdrant vector search + Neo4j relationship graph).
+#
+# REQUIRES the patched image, which is the default above. Upstream's published
+# image has no flag or env var for the Neo4j half of the connection, so the
+# backend is unreachable there. See patches/README.md.
+#
+# Still off by default: it adds two StatefulSets and ~40Gi of storage, and the
+# proxy works fully without it (local SQLite memory on the workspace PVC).
+memory:
+  enabled: false
+  # Bypass the patched-image guard — only relevant if you have pointed
+  # image.repository back at the published upstream image.
+  acknowledgeUnpatchedImage: false
+  topK: 10
+
+  qdrant:
+    enabled: true
+    image:
+      repository: qdrant/qdrant
+      tag: v1.17.1
+      pullPolicy: IfNotPresent
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: ""
+    resources: {}
+    # Point at an existing Qdrant instead of deploying one.
+    external:
+      enabled: false
+      url: ""
+      apiKeySecret: ""
+      apiKeySecretKey: api-key
+
+  neo4j:
+    enabled: true
+    image:
+      repository: neo4j
+      tag: "5.26"
+      pullPolicy: IfNotPresent
+    auth:
+      username: neo4j
+      password: ""              # empty => generated and preserved across upgrades
+      existingSecret: ""
+      existingSecretKey: neo4j-password
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: ""
+    resources: {}
+    external:
+      enabled: false
+      uri: ""
+
+# Upstream provider overrides. Note the proxy holds NO provider credentials —
+# it forwards each caller's own x-api-key / authorization header upstream.
+upstream:
+  anthropicApiUrl: ""
+  openaiApiUrl: ""
+
+# Disable outbound update checks by default; set offline=true to hard-disable
+# all egress (telemetry, model downloads) for air-gapped clusters.
+updateCheck: false
+offline: false
+corsOrigins: ""
+
+extraEnv: []
+extraEnvFrom: []
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 4Gi
+
+# The image runs as uid/gid 1000 ("nonroot"); fsGroup lets it write the PVC.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+# Cold start loads compression models, which takes longer than the image's own
+# 20s start period allows; the startup probe covers that window.
+probes:
+  startup:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    failureThreshold: 60
+  readiness:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  liveness:
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+networkPolicy:
+  enabled: true
+  # Empty => allow proxy ingress from anywhere in the cluster. Datastores are
+  # always restricted to the proxy pod regardless of this setting.
+  proxyIngressFrom: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

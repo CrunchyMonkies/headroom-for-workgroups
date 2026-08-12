@@ -1,0 +1,10 @@
+# `helm dependency update` output for the umbrella chart — the subcharts are
+# local (file://../), so the packaged copies are build artefacts, not sources.
+charts/workgroup/charts/
+
+# Local agent tooling state
+.omc/
+.serena/
+
+# Release build artefacts
+dist/

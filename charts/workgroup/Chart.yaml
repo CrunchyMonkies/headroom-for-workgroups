@@ -1,0 +1,25 @@
+apiVersion: v2
+name: workgroup
+description: Headroom proxy + Ix codebase graph, deployed together for a development team
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - llm
+  - proxy
+  - code-intelligence
+home: https://github.com/headroomlabs-ai/headroom
+sources:
+  - https://github.com/headroomlabs-ai/headroom
+  - https://github.com/ix-infrastructure/Ix
+maintainers:
+  - name: headroom-for-workgroups
+dependencies:
+  - name: headroom
+    version: 0.1.0
+    repository: "file://../headroom"
+    condition: headroom.enabled
+  - name: ix
+    version: 0.1.0
+    repository: "file://../ix"
+    condition: ix.enabled

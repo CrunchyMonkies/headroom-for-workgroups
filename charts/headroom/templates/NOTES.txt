@@ -1,0 +1,58 @@
+Headroom proxy "{{ .Release.Name }}" installed in namespace {{ .Release.Namespace }}.
+
+{{ if .Values.auth.enabled -}}
+1. Read the proxy token developers will authenticate with:
+
+   kubectl -n {{ .Release.Namespace }} get secret {{ include "headroom.authSecretName" . }} \
+     -o jsonpath='{.data.{{ include "headroom.authSecretKey" . }}}' | base64 -d; echo
+
+{{ else -}}
+1. WARNING: auth.enabled=false. Every /v1/* route is reachable without
+   credentials from anywhere that can route to this Service.
+
+{{ end -}}
+2. Reach the proxy:
+
+{{- if eq .Values.expose.mode "none" }}
+
+   The Service is ClusterIP only. Port-forward it:
+
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "headroom.fullname" . }} 8787:{{ .Values.service.port }}
+
+   Base URL: http://127.0.0.1:8787
+   (Loopback callers are exempt from the token, so a port-forward needs no header.)
+{{- else }}
+
+   Base URL: https://{{ include "headroom.exposeHost" . }}
+{{- end }}
+
+3. Point an agent at it:
+
+     export ANTHROPIC_BASE_URL={{ if eq .Values.expose.mode "none" }}http://127.0.0.1:8787{{ else }}https://{{ include "headroom.exposeHost" . }}{{ end }}
+{{- if and .Values.auth.enabled (ne .Values.expose.mode "none") }}
+     export ANTHROPIC_CUSTOM_HEADERS="X-Headroom-Proxy-Token: <token from step 1>"
+{{- end }}
+
+   Your own provider API key still travels with each request — the proxy
+   forwards it upstream and stores no provider credentials.
+
+4. Check health (these endpoints never require the token):
+
+     curl -fsS {{ if eq .Values.expose.mode "none" }}http://127.0.0.1:8787{{ else }}https://{{ include "headroom.exposeHost" . }}{{ end }}/readyz
+
+{{ if .Values.memory.enabled -}}
+Semantic memory is ENABLED (backend: qdrant-neo4j).
+This requires an image built with patches/0001-headroom-neo4j-config-surface.patch.
+Verify the backend was actually selected:
+
+   kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "headroom.fullname" . }} | grep -i memory
+
+{{ else -}}
+Semantic memory is disabled; the proxy uses local SQLite memory on its volume.
+Enabling it requires a patched image — see docs/02-install-server-k8s.md.
+{{ end }}
+{{- if and (ne .Values.expose.mode "none") (not .Values.auth.enabled) }}
+
+!! The proxy is exposed at https://{{ include "headroom.exposeHost" . }} WITHOUT authentication.
+!! Anyone who can reach that host can use it. Set auth.enabled=true.
+{{- end }}

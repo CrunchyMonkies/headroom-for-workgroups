@@ -1,0 +1,41 @@
+{{- $domain := .Values.global.expose.domain -}}
+{{- $hrHost := .Values.headroom.expose.host | default (printf "headroom.%s" $domain) -}}
+{{- $ixHost := .Values.ix.expose.host | default (printf "ix.%s" $domain) -}}
+{{- $hrUrl := ternary "http://127.0.0.1:8787" (printf "https://%s" $hrHost) (eq .Values.headroom.expose.mode "none") -}}
+{{- $ixUrl := ternary "http://127.0.0.1:8090" (printf "https://%s" $ixHost) (eq .Values.ix.expose.mode "none") -}}
+Workgroup release "{{ .Release.Name }}" installed in namespace {{ .Release.Namespace }}.
+
+Components:
+{{ if .Values.headroom.enabled }}  * headroom  LLM proxy — {{ $hrUrl }}{{ if eq .Values.headroom.expose.mode "none" }} (via port-forward; the Service is cluster-internal){{ end }}
+{{- else }}  * headroom  disabled
+{{- end }}
+{{ if .Values.ix.enabled }}  * ix        codebase graph — {{ $ixUrl }}{{ if eq .Values.ix.expose.mode "none" }} (via port-forward; the Service is cluster-internal){{ end }}
+{{- else }}  * ix        disabled
+{{- end }}
+
+Each developer configures their client once:
+{{ if .Values.headroom.enabled }}
+  # Headroom
+{{- if eq .Values.headroom.expose.mode "none" }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ .Release.Name }}-headroom 8787:8787 &
+{{- end }}
+  export ANTHROPIC_BASE_URL={{ $hrUrl }}
+{{- if and .Values.headroom.auth.enabled (ne .Values.headroom.expose.mode "none") }}
+  export ANTHROPIC_CUSTOM_HEADERS="X-Headroom-Proxy-Token: $(kubectl -n {{ .Release.Namespace }} get secret {{ .Release.Name }}-headroom-secrets -o jsonpath='{.data.proxy-token}' | base64 -d)"
+{{- end }}
+{{- end }}
+{{- if .Values.ix.enabled }}
+
+  # Ix
+{{- if eq .Values.ix.expose.mode "none" }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ .Release.Name }}-ix 8090:8090 &
+{{- end }}
+  ix config set endpoint {{ $ixUrl }}
+  ix status
+{{- end }}
+
+Your provider API key never leaves your control: the Headroom proxy forwards
+whatever key you send upstream and stores none of its own.
+
+Full walkthrough:  docs/04-connect-cli-to-server.md
+Per-chart notes:   helm get notes {{ .Release.Name }}

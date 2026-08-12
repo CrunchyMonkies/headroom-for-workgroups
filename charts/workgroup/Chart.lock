@@ -1,0 +1,9 @@
+dependencies:
+- name: headroom
+  repository: file://../headroom
+  version: 0.1.0
+- name: ix
+  repository: file://../ix
+  version: 0.1.0
+digest: sha256:49b2530ba09cfd4ca5d5e1a60766075655abbcead9bf694974e500afa15ef677
+generated: "2026-08-13T01:07:17.101818846+10:00"

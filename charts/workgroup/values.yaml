@@ -1,0 +1,62 @@
+# Umbrella values for a workgroup deployment of Headroom + Ix.
+#
+# This chart owns no templates of its own beyond NOTES.txt. Everything below
+# either (a) lands in `global`, which both subcharts read as a fallback, or
+# (b) is passed straight through to a subchart under its own key.
+
+# ---------------------------------------------------------------------------
+# Configure the team's hostnames once.
+#
+# Both subcharts fall back to these when their own expose.* values are empty:
+#
+#   host              <- "<subchart expose.subdomain>.<domain>"
+#                        i.e. headroom.<domain> and ix.<domain>
+#   ingressClassName  <- expose.ingress.className
+#   tlsSecretName     <- expose.ingress.tls.secretName
+#   gatewayParentRefs <- expose.gateway.parentRefs
+#
+# A subchart value always wins over the global.
+# ---------------------------------------------------------------------------
+global:
+  expose:
+    # e.g. "dev.example.com" => headroom.dev.example.com, ix.dev.example.com
+    domain: ""
+    ingressClassName: ""
+    # A shared wildcard certificate Secret, if you have one. Leave empty to let
+    # each subchart use its own "<release>-<chart>-tls" (what cert-manager
+    # would populate from the ingress annotation).
+    tlsSecretName: ""
+    # e.g. [{name: public-gateway, namespace: gateway-system}]
+    gatewayParentRefs: []
+
+# ---------------------------------------------------------------------------
+# Headroom — the LLM context-compression proxy.
+# Full reference: charts/headroom/values.yaml
+# ---------------------------------------------------------------------------
+headroom:
+  enabled: true
+
+  expose:
+    mode: none          # none | ingress | gateway
+  auth:
+    enabled: true       # token generated on install, preserved across upgrades
+
+  # Semantic memory (Qdrant + Neo4j) requires an image built with
+  # patches/0001-headroom-neo4j-config-surface.patch — the published upstream
+  # image cannot be pointed at a Neo4j. See patches/README.md.
+  memory:
+    enabled: false
+
+# ---------------------------------------------------------------------------
+# Ix — the codebase graph backend.
+# Full reference: charts/ix/values.yaml
+# ---------------------------------------------------------------------------
+ix:
+  enabled: true
+
+  expose:
+    mode: none          # none | ingress | gateway
+  # The Ix API has no built-in authentication. Exposing it without an auth
+  # layer is refused at template time; see charts/ix/values.yaml.
+  auth:
+    mode: none          # none | basic | oauth2Proxy

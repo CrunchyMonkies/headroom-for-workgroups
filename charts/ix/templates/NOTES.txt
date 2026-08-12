@@ -1,0 +1,51 @@
+Ix memory-layer "{{ .Release.Name }}" installed in namespace {{ .Release.Namespace }}.
+
+1. Reach the backend:
+
+{{- if eq .Values.expose.mode "none" }}
+
+   The Service is ClusterIP only. Port-forward it:
+
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "ix.fullname" . }} 8090:{{ .Values.service.port }}
+
+   Endpoint: http://127.0.0.1:8090
+{{- else }}
+
+   Endpoint: https://{{ include "ix.exposeHost" . }}
+   Auth mode: {{ .Values.auth.mode }}
+{{- end }}
+
+2. Point the `ix` CLI at it (per developer):
+
+     ix config set endpoint {{ if eq .Values.expose.mode "none" }}http://127.0.0.1:8090{{ else }}https://{{ include "ix.exposeHost" . }}{{ end }}
+     ix status
+
+   Or without touching ~/.ix/config.yaml:
+
+     export IX_ENDPOINT={{ if eq .Values.expose.mode "none" }}http://127.0.0.1:8090{{ else }}https://{{ include "ix.exposeHost" . }}{{ end }}
+
+   Do NOT run `ix docker start` against this endpoint — it manages a *local*
+   backend and will shadow the remote one.
+
+3. Verify the API:
+
+     curl -fsS {{ if eq .Values.expose.mode "none" }}http://127.0.0.1:8090{{ else }}https://{{ include "ix.exposeHost" . }}{{ end }}/v1/health
+
+{{- if .Values.arangodb.enabled }}
+
+4. ArangoDB root password (needed for backups and arangosh):
+
+     kubectl -n {{ .Release.Namespace }} get secret {{ include "ix.arangoSecretName" . }} \
+       -o jsonpath='{.data.{{ include "ix.arangoSecretKey" . }}}' | base64 -d; echo
+{{- end }}
+
+Auto-map is disabled by default against a remote backend so that every client
+does not push a write on every file change. Run `ix map .` explicitly, or set
+IX_AUTO_MAP_CLOUD=1 if you accept the write volume. See docs/04-connect-cli-to-server.md.
+
+{{- if and (ne .Values.expose.mode "none") (eq .Values.auth.mode "none") }}
+
+!! The Ix API is exposed at https://{{ include "ix.exposeHost" . }} with NO authentication.
+!! It is write-capable: anyone who can reach that host can read or destroy the graph.
+!! Set auth.mode=basic or auth.mode=oauth2Proxy.
+{{- end }}

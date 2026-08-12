@@ -1,0 +1,51 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ix.fullname" . }}-api
+  labels:
+    {{- include "ix.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ix.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: memory-layer
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: {{ include "ix.serviceTargetPort" . }}
+          protocol: TCP
+      {{- with .Values.networkPolicy.apiIngressFrom }}
+      # Empty `from` would mean "allow all"; this narrows it to the configured peers.
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.arangodb.enabled }}
+---
+# ArangoDB holds the whole graph and answers to root; only the memory-layer
+# may reach it, whatever the API's own exposure is.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ix.fullname" . }}-arangodb
+  labels:
+    {{- include "ix.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ix.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: arangodb
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: arangodb
+          protocol: TCP
+      from:
+        - podSelector:
+            matchLabels:
+              {{- include "ix.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: memory-layer
+{{- end }}
+{{- end }}

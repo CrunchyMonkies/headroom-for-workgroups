@@ -1,0 +1,112 @@
+{{- if .Values.arangodb.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ix.arangoFullname" . }}
+  labels:
+    {{- include "ix.labels" . | nindent 4 }}
+    app.kubernetes.io/component: arangodb
+spec:
+  type: ClusterIP
+  ports:
+    - name: arangodb
+      port: 8529
+      targetPort: arangodb
+      protocol: TCP
+  selector:
+    {{- include "ix.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: arangodb
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "ix.arangoFullname" . }}
+  labels:
+    {{- include "ix.labels" . | nindent 4 }}
+    app.kubernetes.io/component: arangodb
+spec:
+  serviceName: {{ include "ix.arangoFullname" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "ix.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: arangodb
+  template:
+    metadata:
+      labels:
+        {{- include "ix.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: arangodb
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: arangodb
+          image: "{{ .Values.arangodb.image.repository }}:{{ .Values.arangodb.image.tag }}"
+          imagePullPolicy: {{ .Values.arangodb.image.pullPolicy }}
+          # Upstream compose runs this with ARANGO_NO_AUTH=1. In-cluster the
+          # port is reachable by anything the NetworkPolicy allows, so the
+          # root password is always set.
+          command:
+            - arangod
+            - --server.endpoint
+            - tcp://0.0.0.0:8529
+            - --experimental-vector-index
+          env:
+            - name: ARANGO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ix.arangoSecretName" . }}
+                  key: {{ include "ix.arangoSecretKey" . }}
+          ports:
+            - name: arangodb
+              containerPort: 8529
+          readinessProbe:
+            httpGet:
+              path: /_api/version
+              port: arangodb
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /_api/version
+              port: arangodb
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/arangodb3
+          resources:
+            {{- toYaml .Values.arangodb.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not .Values.arangodb.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.arangodb.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.arangodb.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.arangodb.persistence.size }}
+  {{- end }}
+{{- end }}

@@ -134,6 +134,15 @@ jobs:
       IMAGE: ghcr.io/${{ needs.verify.outputs.owner }}/headroom
       VERSION: ${{ needs.verify.outputs.version }}
       UPSTREAM_SHORT: ${{ needs.verify.outputs.upstream_short }}
+      # Upstream's Dockerfile defaults to HEADROOM_EXTRAS=proxy,code, which does
+      # NOT include memory-stack (mem0ai, qdrant-client, neo4j). Without it the
+      # qdrant-neo4j backend cannot import its own dependencies and memory init
+      # fails — fail-open, so nothing crashes and nothing reaches stdout; the
+      # proxy just serves traffic and never reports ready until the startup
+      # probe kills it. That is the entire reason charts/headroom exists, so the
+      # extra is not optional for this image. patches/0001 adds the --memory-*
+      # flags; this makes the code behind them actually runnable.
+      EXTRAS_BUILD_ARG: HEADROOM_EXTRAS=proxy,code,memory-stack
     steps:
       - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
@@ -173,6 +182,8 @@ jobs:
           context: upstream
           load: true
           tags: headroom-verify:local
+          build-args: |
+            ${{ env.EXTRAS_BUILD_ARG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -194,6 +205,23 @@ jobs:
             esac
           done
 
+      # The flags above prove the patch applied. They do NOT prove the code
+      # behind them can run: HEADROOM_EXTRAS is a separate build arg, and an
+      # image built without memory-stack accepts every --memory-* flag and then
+      # fails to import qdrant_client at startup. That failure is fail-open and
+      # silent — the proxy runs, serves, and never reports ready — so it has to
+      # be caught here rather than in a cluster. v0.1.1 shipped exactly this way.
+      - name: Verify the memory-stack dependencies are installed
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python3 headroom-verify:local -c '
+          import importlib, sys
+          missing = [m for m in ("qdrant_client", "neo4j", "mem0") if not importlib.util.find_spec(m)]
+          if missing:
+              sys.exit("FAIL: missing %s — rebuild with HEADROOM_EXTRAS including memory-stack" % ", ".join(missing))
+          print("  [ok] qdrant_client, neo4j, mem0")
+          '
+
       - name: Log in to ghcr.io
         if: needs.verify.outputs.publish == 'true'
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
@@ -211,6 +239,10 @@ jobs:
           push: ${{ needs.verify.outputs.publish == 'true' }}
           provenance: true
           sbom: true
+          # Must match the verification build above, or the image that ships is
+          # not the image that was checked.
+          build-args: |
+            ${{ env.EXTRAS_BUILD_ARG }}
           tags: |
             ${{ env.IMAGE }}:${{ env.VERSION }}
             ${{ env.IMAGE }}:${{ env.UPSTREAM_SHORT }}-neo4j

@@ -106,6 +106,29 @@ at `/qdrant/storage` is group-writable. The chart now sets
 you can set the same variable yourself. Headroom will sit at `0/1` with
 `memory.ready: false` for as long as this lasts.
 
+### `helm upgrade` hangs and the replacement pod sits `Pending` forever
+
+```
+0/12 nodes are available: 1 node(s) didn't match PersistentVolume's node
+affinity, 4 Insufficient memory, ...
+```
+
+Fixed in chart 0.1.2 — upgrade. The workspace claim is `ReadWriteOnce`, and a
+RollingUpdate surges the new pod *before* retiring the old one: the new pod
+cannot mount a volume the old pod still holds, and the old pod is not retired
+until the new one is Ready. Neither side moves. On local or topology-bound
+storage it is worse, because the new pod is also pinned to the volume's node and
+has to fit there alongside the pod it is replacing. 0.1.2 sets
+`strategy: Recreate` whenever `persistence.enabled` and not `stateless`.
+
+To unwedge a running 0.1.0/0.1.1 install, delete the outgoing pod so the new one
+can take the volume:
+
+```sh
+kubectl -n workgroup delete pod -l app.kubernetes.io/component=proxy \
+  --field-selector status.phase=Running
+```
+
 ### `CrashLoopBackOff` with permission errors on `/home/nonroot/.headroom`
 
 The image runs as uid 1000 and needs `fsGroup: 1000` to write the PVC. The
@@ -181,6 +204,26 @@ Note the shape of the failure: init is fail-open, so nothing crashes and
 nothing appears on stdout. The proxy runs, answers requests, and never reports
 ready — the startup probe restarts it every five minutes forever.
 
+The same log line will instead say:
+
+```
+Memory: Failed to import qdrant-neo4j dependencies: qdrant-client not
+installed. Install with: pip install 'headroom-ai[memory-stack]'
+```
+
+if the image was built without the `memory-stack` extra. Upstream's Dockerfile
+defaults to `HEADROOM_EXTRAS=proxy,code`, which omits `mem0ai`,
+`qdrant-client` and `neo4j` — so an image can carry patches/0001, accept every
+`--memory-*` flag, and still be unable to run the backend behind them. Images
+`0.1.2` and later are built with the extra and the release pipeline asserts the
+three modules import before it publishes; `0.1.0` and `0.1.1` were not. Check
+what you are running:
+
+```sh
+kubectl -n workgroup exec deploy/wg-headroom -c proxy -- \
+  python3 -c "import qdrant_client, neo4j, mem0; print('memory-stack present')"
+```
+
 ### Memory is enabled but nothing is being recalled
 
 Confirm the backend was actually selected:
@@ -250,6 +293,49 @@ A password mismatch is the usual cause: ArangoDB persists its root user on
 disk, so if the volume survived a reinstall that regenerated the Secret, the
 two disagree. Either restore the old password into the Secret or delete the PVC
 and start clean.
+
+### The memory-layer is `CrashLoopBackOff` and ArangoDB logs `401 … not authorized`
+
+```
+Caused by: com.arangodb.ArangoDBException: Response: 401, Error: 11 - not
+authorized to execute this request
+```
+
+`/v1/health` answers 500 and both memory-layer probes fail, while ArangoDB
+itself is `1/1` and healthy. The Secret and the StatefulSet read the same key,
+so this is not a wiring error — ArangoDB's on-disk root user simply is not the
+password in the Secret.
+
+The way to get here is an interrupted first boot. `ARANGO_ROOT_PASSWORD` is
+applied *only* while initializing an empty data directory; every later start
+skips it because the directory exists. If the container is killed partway
+through that first boot, the directory is left initialized with root's password
+never set — and it stays that way forever. Chart 0.1.0's liveness probe did
+exactly this, killing ArangoDB every 30s from the moment it started, so any
+deployment first installed on 0.1.0 may carry a root user whose password is
+empty even after upgrading to a chart with correct probes.
+
+Upgrading does not repair it, because the damage is on the volume, not in the
+manifest. Two ways out:
+
+- **Delete the ArangoDB PVC and let it initialize cleanly.** Correct whenever
+  the graph is empty or cheap to rebuild with `ix map` — and it is the only
+  option that leaves you with a volume that was bootstrapped properly.
+- **Set the password to match the Secret**, if the graph is worth keeping:
+  ```sh
+  PW=$(kubectl -n workgroup get secret wg-ix-secrets \
+        -o jsonpath='{.data.arango-password}' | base64 -d)
+  kubectl -n workgroup exec -i wg-ix-arangodb-0 -- env NEWPW="$PW" arangosh \
+    --server.endpoint tcp://127.0.0.1:8529 --server.username root \
+    --server.password '' \
+    --javascript.execute-string \
+    'require("@arangodb/users").update("root", require("internal").env.NEWPW)'
+  ```
+  Then restart the memory-layer. Note this only works while root's password is
+  still the empty string — that is the point, and it is also why an ArangoDB in
+  this state is unauthenticated to anything that can reach port 8529. The
+  chart's NetworkPolicy limits that to the memory-layer pod, which is the only
+  reason this is a bug rather than an incident.
 
 If instead ArangoDB's log ends with `ArangoDB … is ready for business` while
 the pod is `0/1` and restarting on its liveness probe, that is the 0.1.0 probe

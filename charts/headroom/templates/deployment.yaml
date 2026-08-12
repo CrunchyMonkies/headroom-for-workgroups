@@ -7,6 +7,23 @@ metadata:
     {{- include "headroom.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if and .Values.persistence.enabled (not .Values.stateless) }}
+  # Recreate, not the RollingUpdate default, whenever the workspace PVC is in
+  # play. RollingUpdate surges a second pod and waits for it to become Ready
+  # before retiring the first — but the workspace claim is ReadWriteOnce, so the
+  # new pod cannot mount it until the old one lets go, and the old one is not
+  # retired until the new one is Ready. That is a deadlock, not a slow rollout:
+  # the replacement sits Pending on the volume forever and `helm upgrade`
+  # appears to hang. On local/topology-bound storage it is worse still, because
+  # the new pod is also pinned to the node the volume lives on and has to fit
+  # alongside the pod it is replacing.
+  #
+  # Recreate trades a few seconds of downtime for a rollout that can actually
+  # converge. Multi-replica deployments need stateless: true anyway (see
+  # headroom.validate), and that path keeps RollingUpdate.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "headroom.selectorLabels" . | nindent 6 }}

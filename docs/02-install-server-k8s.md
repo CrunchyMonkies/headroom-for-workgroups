@@ -28,7 +28,7 @@ kubectl api-resources | grep gateway.networking
 ### Both services together (recommended)
 
 ```sh
-helm install wg oci://ghcr.io/crunchymonkies/charts/workgroup --version 0.1.1 \
+helm install wg oci://ghcr.io/crunchymonkies/charts/workgroup --version 0.1.2 \
   -n workgroup --create-namespace
 ```
 
@@ -36,7 +36,7 @@ Defaults: both services cluster-internal (`expose.mode: none`), Headroom
 authenticated with a generated token, Ix backed by an ArangoDB with a generated
 root password, NetworkPolicies on, Headroom semantic memory off.
 
-`helm show values oci://ghcr.io/crunchymonkies/charts/workgroup --version 0.1.1`
+`helm show values oci://ghcr.io/crunchymonkies/charts/workgroup --version 0.1.2`
 prints the full values file without installing anything. Available versions are
 listed on the [releases page](https://github.com/CrunchyMonkies/headroom-for-workgroups/releases);
 the charts are published as OCI artefacts only, so there is no `helm repo add`
@@ -45,9 +45,9 @@ step.
 ### One at a time
 
 ```sh
-helm install headroom oci://ghcr.io/crunchymonkies/charts/headroom --version 0.1.1 \
+helm install headroom oci://ghcr.io/crunchymonkies/charts/headroom --version 0.1.2 \
   -n workgroup --create-namespace
-helm install ix       oci://ghcr.io/crunchymonkies/charts/ix       --version 0.1.1 \
+helm install ix       oci://ghcr.io/crunchymonkies/charts/ix       --version 0.1.2 \
   -n workgroup
 ```
 
@@ -132,7 +132,7 @@ ix:
 ```
 
 ```sh
-helm upgrade --install wg oci://ghcr.io/crunchymonkies/charts/workgroup --version 0.1.1 \
+helm upgrade --install wg oci://ghcr.io/crunchymonkies/charts/workgroup --version 0.1.2 \
   -n workgroup -f values-ingress.yaml
 ```
 

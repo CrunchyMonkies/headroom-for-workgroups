@@ -87,17 +87,31 @@ git checkout "$HEADROOM_BASE_COMMIT"
 
 git apply --3way "$OLDPWD/$HEADROOM_PATCH"
 
-docker build -t ghcr.io/YOUR-ORG/headroom:neo4j-patch .
+# The build arg is not optional. Upstream's Dockerfile defaults to
+# HEADROOM_EXTRAS=proxy,code, which leaves out mem0ai, qdrant-client and neo4j —
+# so the patch would give you the --memory-* flags with nothing behind them.
+docker build --build-arg HEADROOM_EXTRAS=proxy,code,memory-stack \
+  -t ghcr.io/YOUR-ORG/headroom:neo4j-patch .
 
-# Sanity check: the new flags exist in the artefact, not just in the source
-# tree. ENTRYPOINT is ["headroom","proxy"], so --help lands on the right command.
+# Two separate sanity checks, because they catch two separate mistakes, and both
+# failures are silent at runtime: memory init is fail-open, so a bad image serves
+# traffic and simply never reports ready.
+
+# 1. The flags exist in the artefact, not just in the source tree.
+#    ENTRYPOINT is ["headroom","proxy"], so --help lands on the right command.
 docker run --rm ghcr.io/YOUR-ORG/headroom:neo4j-patch --help | grep memory-
+
+# 2. The code behind them can actually import its dependencies.
+docker run --rm --entrypoint python3 ghcr.io/YOUR-ORG/headroom:neo4j-patch \
+  -c 'import qdrant_client, neo4j, mem0; print("memory-stack present")'
 
 docker push ghcr.io/YOUR-ORG/headroom:neo4j-patch
 ```
 
-That last assertion is what `.github/workflows/release.yml` runs before it
-pushes anything — an unpatched build fails the release rather than shipping.
+Both assertions are what `.github/workflows/release.yml` runs before it pushes
+anything — an unpatched or under-built image fails the release rather than
+shipping. The second was added after `0.1.1` shipped patched but without the
+extra, which looks identical until the proxy refuses to become ready.
 
 Then point the chart at it:
 

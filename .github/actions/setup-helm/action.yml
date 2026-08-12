@@ -21,8 +21,8 @@ runs:
         set -euo pipefail
         tarball="helm-${HELM_VERSION}-linux-amd64.tar.gz"
         cd "$(mktemp -d)"
-        curl -fsSLO "https://get.helm.sh/${tarball}"
-        curl -fsSLO "https://get.helm.sh/${tarball}.sha256sum"
+        curl -fsSLO --retry 5 --retry-all-errors --retry-delay 5 "https://get.helm.sh/${tarball}"
+        curl -fsSLO --retry 5 --retry-all-errors --retry-delay 5 "https://get.helm.sh/${tarball}.sha256sum"
         sha256sum -c "${tarball}.sha256sum"
         tar -xzf "$tarball" linux-amd64/helm
         sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm

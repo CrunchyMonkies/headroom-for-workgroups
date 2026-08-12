@@ -51,13 +51,21 @@ jobs:
         with:
           version: ${{ matrix.helm }}
 
+      # Download to a file, then extract — piping curl into tar turns a
+      # truncated response into "gzip: unexpected end of file" and a red build
+      # (seen once already). --retry covers the transient case; landing it on
+      # disk first means tar only ever sees a complete archive.
       - name: Install kubeconform
         env:
           KUBECONFORM_VERSION: "0.8.0"
         run: |
           set -euo pipefail
-          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin kubeconform
+          cd "$(mktemp -d)"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
+            -o kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          tar -xzf kubeconform.tar.gz kubeconform
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
           kubeconform -v
 
       # lint, the render matrix, the guard rails (positive and negative), and

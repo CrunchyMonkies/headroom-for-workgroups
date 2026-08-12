@@ -315,6 +315,46 @@ kubectl -n workgroup exec deploy/wg-headroom -- python3 -c \
   "import socket;socket.create_connection(('wg-headroom-neo4j',7687),5);print('neo4j reachable')"
 ```
 
+### `/readyz` says memory is healthy, but nothing is ever stored
+
+`/readyz` reports whether memory *initialised*, not whether it can *work*. It
+does not check the embeddings endpoint, and the vector store cannot accept a
+write without one — so an embeddings outage produces a proxy that passes every
+health check, serves traffic normally, and silently stores nothing:
+
+```json
+"memory": {"enabled": true, "ready": true, "status": "healthy",
+           "backend": "qdrant-neo4j", "initialized": true}
+```
+
+Initialisation succeeds even when the endpoint is already down, because
+creating the Qdrant collection does not require an embedding. So a proxy that
+started *after* the outage looks identical to a healthy one.
+
+Check the dependency directly, from the proxy pod — `OPENAI_BASE_URL` is where
+the memory backend gets its vectors:
+
+```sh
+kubectl -n workgroup exec deploy/wg-headroom -- python3 -c '
+import os, json, urllib.request
+url = os.environ["OPENAI_BASE_URL"].rstrip("/") + "/embeddings"
+req = urllib.request.Request(url,
+    data=json.dumps({"model": "text-embedding-3-small", "input": "probe"}).encode(),
+    headers={"Content-Type": "application/json",
+             "Authorization": "Bearer " + os.environ.get("OPENAI_API_KEY", "")})
+print("dims:", len(json.load(urllib.request.urlopen(req, timeout=60))["data"][0]["embedding"]))'
+```
+
+`Name or service not known` means the Service has no ready endpoints — the
+backing pod is down, not that the name is wrong. A headless Service (the usual
+shape for a model StatefulSet) publishes DNS records only for *ready* pods, so
+it stops resolving entirely rather than returning a connection error.
+
+**Monitor this separately.** Nothing in the deployment watches it, and the
+failure is silent in both directions: no error at write time in the proxy log,
+and no signal in `/readyz`. If the embeddings pod runs on a node that can go
+away, treat the probe above as the real memory health check.
+
 ### Provider calls fail with 401 from Anthropic/OpenAI
 
 That is your own key, not the proxy's. The proxy holds no provider credentials

@@ -153,7 +153,11 @@ Request cannot be constructed from a URL that includes credentials
 ```
 
 That is the WHATWG fetch specification, not an Ix bug, so it will not be worked
-around by a patch here.
+around by a patch here. `install.sh` now rejects an `--ix-url` carrying
+credentials for the same reason — note that `IX_ENDPOINT` in the generated
+`env.sh` *overrides* `~/.ix/config.yaml`, so a bad endpoint there breaks every
+`ix` command for anyone who sources their profile, however correct the config
+file looks.
 
 The consequence for deployment: **do not put an authentication layer in front
 of the Ix route** — not `auth.mode: basic`, not an Envoy `SecurityPolicy` with

@@ -157,6 +157,26 @@ parse_args() {
 
   HEADROOM_URL=${HEADROOM_URL%/}
   IX_URL=${IX_URL%/}
+
+  # Reject credentials in the Ix URL rather than writing a config that cannot
+  # work. The ix CLI issues every request through fetch(), and the WHATWG spec
+  # makes fetch() throw on a URL carrying userinfo —
+  #   Request cannot be constructed from a URL that includes credentials
+  # — before a packet is sent. Worse, this fails silently at install time and
+  # loudly later: IX_ENDPOINT in env.sh overrides ~/.ix/config.yaml, so a
+  # developer who sources the profile gets a CLI that is broken for every
+  # command, having watched the installer report success.
+  case ${IX_URL#*://} in
+    *@*) die "--ix-url must not contain credentials.
+
+  The ix CLI cannot send them: it has no Authorization header, no token
+  option, and no .netrc support, and its HTTP client rejects a URL with
+  credentials outright. Putting them here produces a config that fails on
+  every command.
+
+  Pass the bare URL and protect the endpoint at the network layer instead —
+  see docs/04-connect-cli-to-server.md." ;;
+  esac
   return 0
 }
 

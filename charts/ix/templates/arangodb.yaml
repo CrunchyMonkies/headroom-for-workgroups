@@ -50,7 +50,25 @@ spec:
           # Upstream compose runs this with ARANGO_NO_AUTH=1. In-cluster the
           # port is reachable by anything the NetworkPolicy allows, so the
           # root password is always set.
-          command:
+          #
+          # args, NOT command — this is load-bearing and the distinction is the
+          # whole reason ARANGO_ROOT_PASSWORD below does anything. The image is
+          # ENTRYPOINT ["/entrypoint.sh"] + CMD ["arangod"]; `command:` replaces
+          # the entrypoint, and /entrypoint.sh is the only thing that reads
+          # ARANGO_ROOT_PASSWORD (line ~76, `arango-init-database`, gated on
+          # `[ "$1" = 'arangod' ]` and an empty datadir). Override the entrypoint
+          # and arangod starts perfectly well with no root user ever created —
+          # the secret is mounted, ignored, and root ends up with an empty
+          # password. Nothing logs a complaint; the only symptom is every
+          # authenticated client getting `401 … not authorized`, which reads
+          # like a wrong password rather than a bypassed bootstrap.
+          # 0.1.2 and earlier shipped this as `command:`.
+          #
+          # args replaces CMD but keeps the entrypoint, so `arangod` has to stay
+          # spelled out here as the first element — that is what the entrypoint
+          # matches on. It then appends its own --server.authentication and
+          # --config /tmp/arangod.conf before exec'ing.
+          args:
             - arangod
             - --server.endpoint
             - tcp://0.0.0.0:8529

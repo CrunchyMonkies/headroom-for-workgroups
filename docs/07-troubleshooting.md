@@ -306,36 +306,54 @@ itself is `1/1` and healthy. The Secret and the StatefulSet read the same key,
 so this is not a wiring error — ArangoDB's on-disk root user simply is not the
 password in the Secret.
 
-The way to get here is an interrupted first boot. `ARANGO_ROOT_PASSWORD` is
-applied *only* while initializing an empty data directory; every later start
-skips it because the directory exists. If the container is killed partway
-through that first boot, the directory is left initialized with root's password
-never set — and it stays that way forever. Chart 0.1.0's liveness probe did
-exactly this, killing ArangoDB every 30s from the moment it started, so any
-deployment first installed on 0.1.0 may carry a root user whose password is
-empty even after upgrading to a chart with correct probes.
+**On chart 0.1.2 and earlier, this is a chart bug and it happens on every
+install.** The StatefulSet set `command: [arangod, …]`, which replaces the
+image's `/entrypoint.sh` — and that entrypoint is the only thing that ever reads
+`ARANGO_ROOT_PASSWORD`. It creates the root user by running
+`arango-init-database`, gated on `[ "$1" = 'arangod' ]` and an empty data
+directory. Override the entrypoint and `arangod` starts perfectly well, with the
+Secret mounted, ignored, and no root user ever created. 0.1.3 changes
+`command:` to `args:`, which keeps the entrypoint.
 
-Upgrading does not repair it, because the damage is on the volume, not in the
-manifest. Two ways out:
+Nothing logs a complaint, which is what makes this expensive to diagnose. The
+tell is the *absence* of a line — a correct first boot prints:
 
-- **Delete the ArangoDB PVC and let it initialize cleanly.** Correct whenever
-  the graph is empty or cheap to rebuild with `ix map` — and it is the only
-  option that leaves you with a volume that was bootstrapped properly.
-- **Set the password to match the Secret**, if the graph is worth keeping:
-  ```sh
-  PW=$(kubectl -n workgroup get secret wg-ix-secrets \
-        -o jsonpath='{.data.arango-password}' | base64 -d)
-  kubectl -n workgroup exec -i wg-ix-arangodb-0 -- env NEWPW="$PW" arangosh \
-    --server.endpoint tcp://127.0.0.1:8529 --server.username root \
-    --server.password '' \
-    --javascript.execute-string \
-    'require("@arangodb/users").update("root", require("internal").env.NEWPW)'
-  ```
-  Then restart the memory-layer. Note this only works while root's password is
-  still the empty string — that is the point, and it is also why an ArangoDB in
-  this state is unauthenticated to anything that can reach port 8529. The
-  chart's NetworkPolicy limits that to the memory-layer pod, which is the only
-  reason this is a bug rather than an incident.
+```
+Initializing root user...Hang on...
+```
+
+If the ArangoDB log jumps straight to `ready for business` with no such line and
+no `arango-init-database` output, bootstrap never ran:
+
+```sh
+kubectl -n workgroup logs wg-ix-arangodb-0 | grep -i 'initializing root'
+```
+
+Upgrading alone does not repair it, because the entrypoint's bootstrap is gated
+on an empty data directory and yours is not empty. **Upgrade to 0.1.3 or later
+and then delete the ArangoDB PVC**, so the fixed chart gets the empty directory
+it needs:
+
+```sh
+kubectl -n workgroup delete sts wg-ix-arangodb --cascade=orphan
+kubectl -n workgroup delete pod wg-ix-arangodb-0
+kubectl -n workgroup delete pvc data-wg-ix-arangodb-0
+# re-run the install/upgrade so helm recreates the StatefulSet
+```
+
+Do this only when the graph is empty or cheap to rebuild with `ix map`. If it is
+worth keeping, dump it first with `arangodump` — root's password is the empty
+string in this state, which is exactly why the dump will work.
+
+That empty password is also the security half of this bug: an ArangoDB in this
+state accepts anything that can reach port 8529. The chart's NetworkPolicy
+limits that to the memory-layer pod, which is the only reason this is a bug
+rather than an incident. Treat a cluster where that policy was disabled, or
+where 8529 was exposed, as having had an unauthenticated graph database.
+
+A genuinely separate way to reach the same 401 is an interrupted first boot:
+if the container is killed partway through bootstrap, the directory is left
+initialized with root's password never set. The repair is identical.
 
 If instead ArangoDB's log ends with `ArangoDB … is ready for business` while
 the pod is `0/1` and restarting on its liveness probe, that is the 0.1.0 probe

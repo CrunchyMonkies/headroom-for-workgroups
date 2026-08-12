@@ -215,7 +215,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --entrypoint python3 headroom-verify:local -c '
-          import importlib, sys
+          import importlib.util, sys
           missing = [m for m in ("qdrant_client", "neo4j", "mem0") if not importlib.util.find_spec(m)]
           if missing:
               sys.exit("FAIL: missing %s — rebuild with HEADROOM_EXTRAS including memory-stack" % ", ".join(missing))

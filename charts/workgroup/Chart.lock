@@ -1,9 +1,9 @@
 dependencies:
 - name: headroom
   repository: file://../headroom
-  version: 0.1.2
+  version: 0.1.3
 - name: ix
   repository: file://../ix
-  version: 0.1.2
-digest: sha256:a62a66c4e496850e7038533b3c46844c6146cbfd20ddc30bfbb78f3e8cc5a933
-generated: "2026-08-13T05:08:04.05600709+10:00"
+  version: 0.1.3
+digest: sha256:4f54e16066de23a34f2167da17f010d6d548eb0f23ece0f52e38a6fc869cba41
+generated: "2026-08-13T05:23:37.758589794+10:00"

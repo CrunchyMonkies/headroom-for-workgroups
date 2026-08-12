@@ -184,10 +184,14 @@ jobs:
           set -euo pipefail
           out=$(docker run --rm headroom-verify:local --help)
           for flag in --memory-backend --memory-neo4j-uri --memory-neo4j-user --memory-neo4j-password; do
-            printf '%s' "$out" | grep -q -- "$flag" || {
-              echo "FAIL: $flag missing — the built image is not patched"; exit 1
-            }
-            echo "  [ok] $flag"
+            # Matched in-shell rather than `printf | grep -q`. grep -q exits on
+            # the first match and closes the pipe, printf takes EPIPE, and
+            # pipefail turns that into "the flag is missing" — a rehearsal run
+            # failed on --memory-neo4j-user this way while the image was fine.
+            case "$out" in
+              *"$flag"*) echo "  [ok] $flag" ;;
+              *) echo "FAIL: $flag missing — the built image is not patched"; exit 1 ;;
+            esac
           done
 
       - name: Log in to ghcr.io

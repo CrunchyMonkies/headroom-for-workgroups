@@ -139,6 +139,25 @@ section_render() {
 
 # ── guard rails ──────────────────────────────────────────────────────────────
 
+# contains <needle> <haystack> — fixed-string substring test.
+#
+# Deliberately not `printf '%s' "$haystack" | grep -qF -- "$needle"`: grep -q
+# exits on the first match and closes the pipe, printf takes EPIPE, and
+# `set -o pipefail` turns a *successful* match into a failed pipeline. The
+# identical pattern in release.yml's patch check failed a rehearsal run that
+# way, reporting a flag as missing from an image that had it.
+contains() {
+  case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac
+}
+
+# indent5 <text> — first five lines, indented, for failure diagnostics.
+# `|| true` because head closes the pipe on longer input and this runs on a
+# path that has already failed; an EPIPE here must not abort the run before
+# the remaining checks have reported.
+indent5() {
+  printf '%s\n' "$1" | sed 's/^/        /' | head -5 || true
+}
+
 # expect_fail <expected substring> <chart> [helm args...]
 #
 # The charts validate at template time. These assert the refusal actually
@@ -150,11 +169,11 @@ expect_fail() {
   local out
   if out=$(helm template rel "$chart" "$@" 2>&1); then
     bad "expected failure, but it rendered: $chart $*"
-  elif printf '%s' "$out" | grep -qF -- "$expect"; then
+  elif contains "$expect" "$out"; then
     ok "$expect"
   else
     bad "failed, but not with the expected message: $expect"
-    printf '%s\n' "$out" | sed 's/^/        /' | head -5
+    indent5 "$out"
   fi
 }
 
@@ -166,7 +185,7 @@ expect_ok() {
     ok "$label"
   else
     bad "$label"
-    helm template rel "$chart" "$@" 2>&1 | sed 's/^/        /' | head -5
+    indent5 "$(helm template rel "$chart" "$@" 2>&1 || true)"
   fi
 }
 

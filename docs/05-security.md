@@ -225,7 +225,7 @@ Secrets Operator, Vault injection, or Sealed Secrets.
 | --- | --- |
 | Path | `~/.config/headroom-workgroup/env.sh`, or `env.ps1` on Windows |
 | Permissions | created under `umask 077` and `chmod 600`; on Windows, inherited ACEs are stripped and only the current user is granted access |
-| Contains | `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `IX_ENDPOINT`, `ANTHROPIC_CUSTOM_HEADERS`, and — if you gave one — `HEADROOM_PROXY_TOKEN` |
+| Contains | `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `IX_ENDPOINT`, `ENABLE_TOOL_SEARCH`, and — if you gave a token — `HEADROOM_PROXY_TOKEN` and `ANTHROPIC_CUSTOM_HEADERS` |
 | Never contains | `ANTHROPIC_API_KEY` or any other provider key. Your own key is not the server's business and the installer does not touch it. |
 
 The file is created empty and locked down *before* the token is written into it,

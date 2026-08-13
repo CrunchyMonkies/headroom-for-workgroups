@@ -2,11 +2,11 @@ apiVersion: v2
 name: headroom
 description: Headroom LLM context-compression proxy for workgroups, with optional Qdrant + Neo4j semantic memory
 type: application
-version: 0.1.3
+version: 0.1.4
 # The tag of the patched image this repo publishes (see patches/upstream.env).
 # `image.tag: ""` resolves to this, and release.yml tags the image with the
 # release version, so the two move together. Keep it equal to `version`.
-appVersion: "0.1.3"
+appVersion: "0.1.4"
 keywords:
   - llm
   - proxy

@@ -1,0 +1,44 @@
+diff --git a/headroom/memory/backends/direct_mem0.py b/headroom/memory/backends/direct_mem0.py
+index 20c4546..5fb72ec 100644
+--- a/headroom/memory/backends/direct_mem0.py
++++ b/headroom/memory/backends/direct_mem0.py
+@@ -799,13 +799,32 @@ class DirectMem0Adapter:
+         """
+         await self._ensure_initialized()
+ 
+-        # Use Mem0's search (no LLM calls, just embeddings)
+-        results = await asyncio.to_thread(
+-            self._mem0_client.search,
+-            query=query,
+-            user_id=user_id,
+-            limit=top_k,
+-        )
++        # Use Mem0's search (no LLM calls, just embeddings).
++        #
++        # Mem0 2.x — the range pyproject.toml declares (mem0ai>=2.0.0,<3.0) —
++        # scopes by entity through `filters` and caps results with `top_k`.
++        # Passing user_id= is rejected outright ("Top-level entity parameters
++        # ... are not supported in search()"), and limit= is silently ignored,
++        # so every search raised before reaching the vector store.
++        #
++        # A blank query is the "return everything for this user" convention
++        # that memory_list relies on (proxy/memory_handler.py falls back to
++        # search_memories(query="") for backends with no list_memories).
++        # Mem0 2.x rejects an empty query as well; get_all() is its spelling
++        # for the same request.
++        if query.strip():
++            results = await asyncio.to_thread(
++                self._mem0_client.search,
++                query=query,
++                filters={"user_id": user_id},
++                top_k=top_k,
++            )
++        else:
++            results = await asyncio.to_thread(
++                self._mem0_client.get_all,
++                filters={"user_id": user_id},
++                top_k=top_k,
++            )
+ 
+         search_results: list[MemorySearchResult] = []
+         result_list = results if isinstance(results, list) else results.get("results", [])

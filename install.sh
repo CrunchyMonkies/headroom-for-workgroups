@@ -372,6 +372,28 @@ token_line() {
   fi
 }
 
+# Emitted beside whichever ANTHROPIC_BASE_URL export ends up in the file, so
+# the two always travel together. Written as a helper rather than twice inline
+# for the same reason token_line is one: only one branch is ever emitted, and
+# the explanation should not drift between them.
+#
+# shellcheck disable=SC2016
+tool_search_lines() {
+  echo "# Claude Code defers its tool schemas — sending names only, and fetching"
+  echo "# the full definition when a tool is actually used — but it turns that"
+  echo "# off whenever ANTHROPIC_BASE_URL points somewhere other than Anthropic"
+  echo "# unless this is set (headroomlabs-ai/headroom#746). Unset, every request"
+  echo "# from here on carries all ~82 schemas in full: ~129 KB of tokens the"
+  echo "# proxy then has to compress, instead of never being sent them."
+  echo "#"
+  echo "# \${VAR:-true} rather than a bare assignment because your own choice"
+  echo "# wins: export ENABLE_TOOL_SEARCH=auto (or auto:N, or false) before this"
+  echo "# file is sourced and it survives. \`headroom wrap\` follows the same"
+  echo "# rule — it leaves a non-empty value alone — so this composes with the"
+  echo "# wrapper rather than fighting it."
+  echo 'export ENABLE_TOOL_SEARCH="${ENABLE_TOOL_SEARCH:-true}"'
+}
+
 # shellcheck disable=SC2016  # writing shell source, expansion is the reader's job
 write_env_file() {
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -426,15 +448,21 @@ write_env_file() {
         echo "if [ -n \"\${ANTHROPIC_API_KEY:-}\" ]; then"
         echo "  export ANTHROPIC_BASE_URL=$HEADROOM_URL"
         echo '  export ANTHROPIC_CUSTOM_HEADERS="X-Headroom-Proxy-Token: $HEADROOM_PROXY_TOKEN"'
+        # Inside the guard: it is ANTHROPIC_BASE_URL pointing away from
+        # Anthropic that disables tool search, so where that does not happen
+        # there is nothing to re-enable.
+        tool_search_lines | sed 's/^/  /'
         echo "fi"
         echo "if [ -n \"\${OPENAI_API_KEY:-}\" ]; then"
         echo "  export OPENAI_BASE_URL=$HEADROOM_URL/v1"
         echo "fi"
         echo
         echo "# Force it on regardless (an API-key client the variables above"
-        echo "# cannot see, for instance) — both lines, or the proxy rejects you:"
+        echo "# cannot see, for instance) — the first two, or the proxy rejects"
+        echo "# you; the third for the reason given above:"
         echo "#   export ANTHROPIC_BASE_URL=$HEADROOM_URL"
         echo "#   export ANTHROPIC_CUSTOM_HEADERS=\"X-Headroom-Proxy-Token: \$HEADROOM_PROXY_TOKEN\""
+        echo "#   export ENABLE_TOOL_SEARCH=true"
       else
         echo "# No proxy token was given, so this routes every client"
         echo "# unconditionally — including a subscription/OAuth login to Claude"
@@ -455,6 +483,10 @@ write_env_file() {
         echo "# it will write the guarded form instead."
         echo "export ANTHROPIC_BASE_URL=$HEADROOM_URL"
         echo "export OPENAI_BASE_URL=$HEADROOM_URL/v1"
+        echo
+        # Unconditional here, matching the base URL beside it: this branch
+        # routes every client, so every client needs it.
+        tool_search_lines
         echo
         echo "# Opt back out for one shell without editing this file:"
         echo "#   unset ANTHROPIC_BASE_URL OPENAI_BASE_URL"

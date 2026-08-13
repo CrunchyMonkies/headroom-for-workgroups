@@ -2,7 +2,7 @@ apiVersion: v2
 name: ix
 description: Ix codebase-graph backend (memory-layer + ArangoDB) for workgroups
 type: application
-version: 0.1.3
+version: 0.1.4
 appVersion: "latest"
 keywords:
   - code-intelligence

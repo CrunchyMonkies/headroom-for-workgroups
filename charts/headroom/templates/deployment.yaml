@@ -118,6 +118,15 @@ spec:
               value: "qdrant-neo4j"
             - name: HEADROOM_MEMORY_TOP_K
               value: {{ .Values.memory.topK | quote }}
+            # mem0 ships PostHog analytics on by default (MEM0_TELEMETRY
+            # defaults to "True") and emits an event per memory operation.
+            # Neither `updateCheck: false` nor `offline: true` covers it —
+            # those are Headroom's own knobs, and this egress is a
+            # dependency's. Hardcoded rather than exposed as a value: an
+            # unprompted outbound call per memory write is not something a
+            # cluster operator should have to opt out of.
+            - name: MEM0_TELEMETRY
+              value: "False"
             - name: HEADROOM_QDRANT_URL
               value: {{ include "headroom.qdrantUrl" . | quote }}
             {{- if and .Values.memory.qdrant.external.enabled .Values.memory.qdrant.external.apiKeySecret }}

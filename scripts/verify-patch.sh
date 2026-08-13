@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
-# Confirm patches/0001 still applies cleanly to the upstream commit pinned in
-# patches/upstream.env.
+# Confirm every patch in patches/upstream.env still applies cleanly, in order,
+# to the upstream commit pinned there.
 #
-# This is the check that detects the patch rotting. Nothing else would: the
-# charts render fine, the image builds fine, and the failure only shows up as a
-# memory subsystem that silently falls back to local SQLite.
+# This is the check that detects a patch rotting. Nothing else would: the
+# charts render fine, the image builds fine, and the failure only shows up at
+# runtime — a memory subsystem that silently falls back to local SQLite, or a
+# memory search that raises on every call.
 #
-#   scripts/verify-patch.sh              # apply --check only (fast)
+#   scripts/verify-patch.sh              # apply to a throwaway tree, then discard
 #   scripts/verify-patch.sh --keep       # leave the patched tree for inspection
 #
 # Requires network access.
@@ -25,19 +26,24 @@ KEEP=0
 
 : "${HEADROOM_REPO:?not set in patches/upstream.env}"
 : "${HEADROOM_BASE_COMMIT:?not set in patches/upstream.env}"
-: "${HEADROOM_PATCH:?not set in patches/upstream.env}"
+: "${HEADROOM_PATCHES:?not set in patches/upstream.env}"
 
-PATCH_ABS="$REPO_ROOT/$HEADROOM_PATCH"
-[ -f "$PATCH_ABS" ] || { echo "missing patch: $HEADROOM_PATCH" >&2; exit 1; }
+# Deliberate word splitting: HEADROOM_PATCHES is a space-separated, ordered list.
+# shellcheck disable=SC2206
+PATCHES=($HEADROOM_PATCHES)
+for p in "${PATCHES[@]}"; do
+  [ -f "$REPO_ROOT/$p" ] || { echo "missing patch: $p" >&2; exit 1; }
+done
 
 WORK=$(mktemp -d)
 cleanup() { [ "$KEEP" -eq 1 ] || rm -rf "$WORK"; }
 trap cleanup EXIT
 
 printf '\n\033[1m── upstream\033[0m\n'
-printf '  repo    %s\n  commit  %s\n  patch   %s (sha256 %s)\n' \
-  "$HEADROOM_REPO" "$HEADROOM_BASE_COMMIT" "$HEADROOM_PATCH" \
-  "$(sha256sum "$PATCH_ABS" | cut -c1-16)"
+printf '  repo    %s\n  commit  %s\n' "$HEADROOM_REPO" "$HEADROOM_BASE_COMMIT"
+for p in "${PATCHES[@]}"; do
+  printf '  patch   %s (sha256 %s)\n' "$p" "$(sha256sum "$REPO_ROOT/$p" | cut -c1-16)"
+done
 
 # Fetch only the pinned commit — a full clone of upstream is not needed and the
 # blob filter keeps this to seconds.
@@ -52,21 +58,25 @@ fi
 git -C "$WORK" checkout -q FETCH_HEAD
 printf '  ok\n'
 
+# Applied for real, in order, rather than --check'd independently: patch N is
+# generated against the tree with 1..N-1 already applied, so checking each one
+# against pristine upstream would pass on patches that cannot actually stack.
 printf '\n\033[1m── applying\033[0m\n'
-if git -C "$WORK" apply --3way --check "$PATCH_ABS" 2>"$WORK/.err"; then
-  printf '  \033[32m[ok]\033[0m   patch applies cleanly\n'
-else
-  printf '  \033[31m[FAIL]\033[0m patch no longer applies to %s\n' "$HEADROOM_BASE_COMMIT"
-  sed 's/^/        /' "$WORK/.err" >&2
-  printf '\n  Re-base it: check out a newer upstream commit, re-apply by hand,\n'
-  printf '  regenerate the patch, and bump HEADROOM_BASE_COMMIT in\n'
-  printf '  patches/upstream.env. See docs/08-releasing.md.\n'
-  exit 1
-fi
+for p in "${PATCHES[@]}"; do
+  if git -C "$WORK" apply --3way "$REPO_ROOT/$p" 2>"$WORK/.err"; then
+    printf '  \033[32m[ok]\033[0m   %s\n' "$p"
+  else
+    printf '  \033[31m[FAIL]\033[0m %s no longer applies to %s\n' "$p" "$HEADROOM_BASE_COMMIT"
+    sed 's/^/        /' "$WORK/.err" >&2
+    printf '\n  Re-base it: check out a newer upstream commit, re-apply by hand,\n'
+    printf '  regenerate the patch, and bump HEADROOM_BASE_COMMIT in\n'
+    printf '  patches/upstream.env. See docs/08-releasing.md.\n'
+    exit 1
+  fi
+done
 
 if [ "$KEEP" -eq 1 ]; then
-  git -C "$WORK" apply --3way "$PATCH_ABS"
   printf '\n  patched tree left at %s\n' "$WORK"
 fi
 
-printf '\n\033[32mpatch verified\033[0m\n'
+printf '\n\033[32m%s patch(es) verified\033[0m\n' "${#PATCHES[@]}"

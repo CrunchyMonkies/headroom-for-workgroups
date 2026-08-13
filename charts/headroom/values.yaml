@@ -187,6 +187,12 @@ upstream:
 
 # Disable outbound update checks by default; set offline=true to hard-disable
 # all egress (telemetry, model downloads) for air-gapped clusters.
+#
+# Both are Headroom's own knobs and neither reaches its dependencies. mem0 in
+# particular ships PostHog analytics on by default and emits an event per
+# memory operation, so the chart hardcodes MEM0_TELEMETRY=False whenever
+# memory.enabled=true rather than leave that egress on behind an `offline`
+# that does not cover it.
 updateCheck: false
 offline: false
 corsOrigins: ""

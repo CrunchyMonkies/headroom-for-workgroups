@@ -72,11 +72,13 @@ jobs:
       # strict schema validation of everything rendered.
       - run: scripts/verify-charts.sh all
 
-  # ── the patch against upstream ───────────────────────────────────────────
-  # The only check that catches patches/0001 rotting. Without it the failure is
-  # silent: the image still builds, and memory quietly falls back to SQLite.
+  # ── the patches against upstream ─────────────────────────────────────────
+  # The only check that catches a patch rotting, and it applies them in order
+  # so it also catches them ceasing to stack. Without it the failure is silent:
+  # the image still builds, memory quietly falls back to SQLite, and search
+  # raises on every call.
   patch:
-    name: Upstream patch applies
+    name: Upstream patches apply
     runs-on: ubuntu-latest
     steps:
       - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0

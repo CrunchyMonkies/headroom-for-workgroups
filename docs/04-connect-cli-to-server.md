@@ -77,6 +77,36 @@ curl https://headroom.dev.example.com/v1/messages \
   -d '{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
+### Keep Claude Code's tool schemas deferred
+
+Set this next to the base URL, always:
+
+```sh
+export ENABLE_TOOL_SEARCH=true
+```
+
+Claude Code normally defers tool definitions — it sends the tool *names* and
+fetches a full schema only when a tool is actually used. Pointing
+`ANTHROPIC_BASE_URL` at anything other than Anthropic turns that off unless
+this variable is set ([headroom#746][746]), and every request then carries all
+~82 schemas in full. That is ~129 KB of tokens per request, arriving at the
+proxy for it to compress — work that vanishes entirely if the schemas are
+never sent.
+
+Both installers write this line for you. It is worth stating separately
+because the cost is invisible: nothing errors, nothing warns, and the only
+symptom is a larger-than-expected input token count on every call.
+
+`headroom wrap` sets the same variable, and leaves a non-empty value alone —
+so exporting it yourself composes with the wrapper rather than fighting it.
+The accepted values are Claude Code's own, which `wrap --tool-search`
+validates against but does not interpret: `true`/`1`/`yes`/`on`,
+`false`/`0`/`no`/`off`, `auto`, and `auto:N` for `N` in 0–100. Only the falsy
+set turns deferral off; everything else keeps it on. `true` is what both
+installers write and what upstream's own `TOOL_SEARCH_DEFAULT` uses.
+
+[746]: https://github.com/headroomlabs-ai/headroom/issues/746
+
 ### Verify
 
 ```sh
@@ -123,7 +153,9 @@ this path.
 
 **Or skip `wrap` entirely.** Setting `ANTHROPIC_BASE_URL` in your shell profile
 achieves the same routing for every agent you launch, permanently, and works
-against the remote proxy directly.
+against the remote proxy directly. Set `ENABLE_TOOL_SEARCH` alongside it — that
+is the one thing `wrap` was doing for you that a bare base URL does not; see
+[above](#keep-claude-codes-tool-schemas-deferred).
 
 ---
 
@@ -239,6 +271,7 @@ kubectl -n workgroup port-forward svc/wg-headroom 8787:8787 &
 kubectl -n workgroup port-forward svc/wg-ix       8090:8090 &
 
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+export ENABLE_TOOL_SEARCH=true
 ix config set endpoint http://127.0.0.1:8090
 ```
 
@@ -274,6 +307,7 @@ export ANTHROPIC_BASE_URL="https://headroom.dev.example.com"
 export OPENAI_BASE_URL="https://headroom.dev.example.com/v1"
 export HEADROOM_PROXY_TOKEN="$(pass show workgroup/headroom-token)"
 export ANTHROPIC_CUSTOM_HEADERS="X-Headroom-Proxy-Token: $HEADROOM_PROXY_TOKEN"
+export ENABLE_TOOL_SEARCH=true   # keeps tool deferral on behind a custom base URL
 
 # Your own provider key — unchanged, and never sent to the server's config.
 export ANTHROPIC_API_KEY="$(pass show anthropic/api-key)"
@@ -293,6 +327,7 @@ wg-forward() {
 
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8787"
 export OPENAI_BASE_URL="http://127.0.0.1:8787/v1"
+export ENABLE_TOOL_SEARCH=true   # loopback is still a custom base URL
 export IX_ENDPOINT="http://127.0.0.1:8090"
 export ANTHROPIC_API_KEY="$(pass show anthropic/api-key)"
 ```

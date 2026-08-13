@@ -337,7 +337,33 @@ function Write-EnvFile {
             "`$env:ANTHROPIC_BASE_URL = '$HeadroomUrl'"
             "`$env:OPENAI_BASE_URL = '$HeadroomUrl/v1'"
             (Get-TokenLine)
-            "`$env:ANTHROPIC_CUSTOM_HEADERS = `"X-Headroom-Proxy-Token: `$(`$env:HEADROOM_PROXY_TOKEN)`""
+        )
+
+        # Only when a token was actually configured. The client attaches this
+        # header to whatever host it talks to, so writing it unconditionally
+        # meant a tokenless install sent a literal "X-Headroom-Proxy-Token:"
+        # with an empty value to Anthropic on every request - a header the
+        # provider has no use for and one more thing that gets logged.
+        # install.sh has guarded it since 8f1a90c; this is the same fix.
+        if ($Token -or $TokenCommand) {
+            $lines += "`$env:ANTHROPIC_CUSTOM_HEADERS = `"X-Headroom-Proxy-Token: `$(`$env:HEADROOM_PROXY_TOKEN)`""
+        }
+
+        $lines += @(
+            ''
+            '# Claude Code defers its tool schemas - sending names only, and'
+            '# fetching the full definition when a tool is used - but it turns'
+            '# that off whenever ANTHROPIC_BASE_URL points somewhere other than'
+            '# Anthropic unless this is set (headroomlabs-ai/headroom#746).'
+            '# Unset, every request carries all ~82 schemas in full: ~129 KB of'
+            '# tokens the proxy then has to compress, instead of never being'
+            '# sent them.'
+            '#'
+            '# Guarded rather than assigned outright so your own choice wins -'
+            '# set ENABLE_TOOL_SEARCH to auto, auto:N or false before this file'
+            '# loads and it survives. "headroom wrap" follows the same rule, so'
+            '# this composes with the wrapper rather than fighting it.'
+            'if (-not $env:ENABLE_TOOL_SEARCH) { $env:ENABLE_TOOL_SEARCH = ''true'' }'
             ''
             '# Your own provider key is NOT set here and does not change. The proxy'
             '# holds no provider credentials - it forwards whatever key your client'
@@ -387,7 +413,7 @@ function Write-ShellProfile {
 
     if ($DryRun) {
         Write-Dry "append the load line to $PROFILE"
-        Write-Dry 'persist ANTHROPIC_BASE_URL / OPENAI_BASE_URL / IX_ENDPOINT at user scope'
+        Write-Dry 'persist ANTHROPIC_BASE_URL / OPENAI_BASE_URL / ENABLE_TOOL_SEARCH / IX_ENDPOINT at user scope'
         return
     }
 
@@ -416,11 +442,17 @@ function Write-ShellProfile {
         if (-not $SkipHeadroom) {
             [Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL', $HeadroomUrl, 'User')
             [Environment]::SetEnvironmentVariable('OPENAI_BASE_URL', "$HeadroomUrl/v1", 'User')
+            # Not optional here. It is the ANTHROPIC_BASE_URL on the line above
+            # that makes Claude Code stop deferring tool schemas (#746, see the
+            # config file), so persisting one without the other is how a
+            # GUI-launched editor ends up paying ~129 KB a request with no
+            # env.ps1 anywhere in sight to explain why.
+            [Environment]::SetEnvironmentVariable('ENABLE_TOOL_SEARCH', 'true', 'User')
         }
         if (-not $SkipIx) {
             [Environment]::SetEnvironmentVariable('IX_ENDPOINT', $IxUrl, 'User')
         }
-        Write-Ok 'base URLs persisted at user scope (the token was not - it stays in the config file)'
+        Write-Ok 'base URLs and ENABLE_TOOL_SEARCH persisted at user scope (the token was not - it stays in the config file)'
     }
 }
 

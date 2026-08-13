@@ -101,18 +101,21 @@ itself.
 In order, because the ordering is the safety property:
 
 1. **`verify`** — `verify-versions.sh` (tag ⇔ Chart.yaml), `verify-charts.sh all`
-   (every render, every guard rail), `verify-patch.sh` (the patch still applies
-   to the pinned upstream commit).
-2. **`image`** — checks out upstream at `HEADROOM_BASE_COMMIT`, applies the
-   patch (**hard failure**, never an unpatched fallback), builds locally, and
-   then asserts the patch is live *in the artefact*:
+   (every render, every guard rail), `verify-patch.sh` (every patch still
+   applies, in order, to the pinned upstream commit).
+2. **`image`** — checks out upstream at `HEADROOM_BASE_COMMIT`, applies every
+   patch in `HEADROOM_PATCHES` **in order** (**hard failure**, never an
+   unpatched fallback), builds locally, and then asserts each one is live *in
+   the artefact*:
 
    ```sh
    docker run --rm headroom-verify:local --help   # ENTRYPOINT is ["headroom","proxy"]
    ```
 
    All four of `--memory-backend`, `--memory-neo4j-uri`, `--memory-neo4j-user`
-   and `--memory-neo4j-password` must appear. Only then does it push.
+   and `--memory-neo4j-password` must appear (`0001`). `0002` adds no CLI
+   surface, so it is asserted against `DirectMem0Adapter.search_memories`'s
+   source inside the image instead. Only then does it push.
 3. **`charts`** — runs *after* `image`, so a published chart can never reference
    an image tag that does not exist. Packages, pushes, then pulls the umbrella
    back out of the registry and renders it as a round-trip check.
@@ -126,11 +129,13 @@ and add `docker/setup-qemu-action` before the build steps.
 
 ---
 
-## Re-basing the patch onto a newer upstream
+## Re-basing the patches onto a newer upstream
 
-The patch is pinned to one upstream commit in
+The patches are pinned to one upstream commit in
 [`patches/upstream.env`](../patches/upstream.env), which is the only place that
-commit appears.
+commit appears. `HEADROOM_PATCHES` there is an **ordered list**: each patch is
+generated against the tree with its predecessors applied, and everything that
+reads the file applies them in sequence. Do not sort it.
 
 ```sh
 # 1. Point at the new commit.
@@ -146,13 +151,19 @@ If it does, that one-line change is the whole re-base. If it does not:
 scripts/verify-patch.sh --keep    # leaves a checkout of the new commit
 ```
 
-Re-apply the three changes by hand in that tree — `headroom/memory/neo4j_env.py`,
-`headroom/proxy/models.py`, `headroom/cli/proxy.py`; see
+Re-apply the changes by hand in that tree — `0001` touches
+`headroom/memory/neo4j_env.py`, `headroom/proxy/models.py` and
+`headroom/cli/proxy.py`; `0002` touches
+`headroom/memory/backends/direct_mem0.py`; see
 [patches/README.md](../patches/README.md) for what each one does — then
-regenerate:
+regenerate each from its own file scope, so they stay separable rather than
+collapsing into one blob:
 
 ```sh
-git -C <tree> diff > patches/0001-headroom-neo4j-config-surface.patch
+git -C <tree> diff -- headroom/memory/neo4j_env.py headroom/proxy/models.py \
+  headroom/cli/proxy.py > patches/0001-headroom-neo4j-config-surface.patch
+git -C <tree> diff -- headroom/memory/backends/direct_mem0.py \
+  > patches/0002-headroom-mem0-2x-search-api.patch
 scripts/verify-patch.sh
 ```
 
@@ -160,10 +171,12 @@ Then cut a release: the image tag `<upstream-short-sha>-neo4j` changes with the
 base commit, so the new base is visible in the registry without reading any
 metadata.
 
-**If upstream merges the patch**, delete it, drop the guard's denylist entry in
+**If upstream merges `0001`**, delete it, drop the guard's denylist entry in
 `charts/headroom/templates/_helpers.tpl`, and point `image.repository` back at
 upstream in `charts/headroom/values.yaml`. Until then, consumers who want the
-stock image can set `memory.acknowledgeUnpatchedImage: true`.
+stock image can set `memory.acknowledgeUnpatchedImage: true`. **If upstream
+merges `0002`**, drop it from `HEADROOM_PATCHES` and remove its verification
+step from `release.yml` — nothing else names it.
 
 ---
 
@@ -225,9 +238,11 @@ gh attestation verify oci://ghcr.io/crunchymonkies/headroom:0.2.0 \
   -R CrunchyMonkies/headroom-for-workgroups
 ```
 
-The `io.headroom-for-workgroups.upstream.commit` and `.patch.sha256` labels name
-exactly which upstream commit and which patch content went into the image. They
-are always present, which is why they come first.
+The `io.headroom-for-workgroups.upstream.commit`, `.patches` and
+`.patches.sha256` labels name exactly which upstream commit and which patch set
+went into the image — the digest is taken over the patch files concatenated in
+`HEADROOM_PATCHES` order, so a reordered or substituted set does not match.
+They are always present, which is why they come first.
 
 `gh attestation verify` is the stronger check but is not always available:
 `actions/attest-build-provenance` requires a paid GitHub plan on a **private**

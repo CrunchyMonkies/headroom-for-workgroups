@@ -44,7 +44,8 @@ jobs:
       upstream_repo: ${{ steps.v.outputs.upstream_repo }}
       upstream_commit: ${{ steps.v.outputs.upstream_commit }}
       upstream_short: ${{ steps.v.outputs.upstream_short }}
-      patch_sha256: ${{ steps.v.outputs.patch_sha256 }}
+      patches: ${{ steps.v.outputs.patches }}
+      patches_sha256: ${{ steps.v.outputs.patches_sha256 }}
     steps:
       - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
@@ -92,7 +93,13 @@ jobs:
             echo "upstream_repo=$HEADROOM_REPO"
             echo "upstream_commit=$HEADROOM_BASE_COMMIT"
             echo "upstream_short=${HEADROOM_BASE_COMMIT:0:12}"
-            echo "patch_sha256=$(sha256sum "$HEADROOM_PATCH" | cut -d' ' -f1)"
+            echo "patches=$HEADROOM_PATCHES"
+            # One digest over the ordered list, not one per patch: the label has
+            # to answer "is this the exact patch set I audited", and hashing the
+            # concatenation in HEADROOM_PATCHES order makes a reorder change the
+            # answer. The word splitting is the point.
+            # shellcheck disable=SC2086
+            echo "patches_sha256=$(cat $HEADROOM_PATCHES | sha256sum | cut -d' ' -f1)"
           } >>"$GITHUB_OUTPUT"
 
           echo "version=$version publish=$publish owner=$owner_lc"
@@ -163,12 +170,21 @@ jobs:
           path: upstream
 
       # Hard failure only. There is no "build it unpatched anyway" fallback:
-      # the resulting image would look identical and silently ignore Neo4j.
-      - name: Apply patches/0001
+      # the resulting image would look identical, silently ignore Neo4j, and
+      # raise on every memory search.
+      - name: Apply patches
         working-directory: upstream
+        env:
+          PATCHES: ${{ needs.verify.outputs.patches }}
         run: |
           set -euo pipefail
-          git apply --3way "$GITHUB_WORKSPACE/workgroup/patches/0001-headroom-neo4j-config-surface.patch"
+          # Order matters — each patch is generated against the tree with its
+          # predecessors applied. $PATCHES is split deliberately.
+          # shellcheck disable=SC2086
+          for p in $PATCHES; do
+            echo "applying $p"
+            git apply --3way "$GITHUB_WORKSPACE/workgroup/$p"
+          done
           git --no-pager diff --stat HEAD
 
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
@@ -190,7 +206,7 @@ jobs:
       # The image's ENTRYPOINT is ["headroom","proxy"], so this runs
       # `headroom proxy --help`. If the patch did not make it into the layers,
       # these flags do not exist and the release stops here.
-      - name: Verify the patch is live in the image
+      - name: Verify patches/0001 is live in the image
         run: |
           set -euo pipefail
           out=$(docker run --rm headroom-verify:local --help)
@@ -222,6 +238,26 @@ jobs:
           print("  [ok] qdrant_client, neo4j, mem0")
           '
 
+      # patches/0002 has no CLI surface to check, so it is asserted against the
+      # source in the layers instead. The bug it fixes is invisible from
+      # outside: memory search raises, the proxy logs a warning, /readyz stays
+      # green, and recall just returns nothing forever. An unpatched image
+      # cannot be told apart from a patched one at runtime without storing a
+      # memory first, so check the code.
+      - name: Verify patches/0002 is live in the image
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python3 headroom-verify:local -c '
+          import inspect, sys
+          from headroom.memory.backends.direct_mem0 import DirectMem0Adapter
+          src = inspect.getsource(DirectMem0Adapter.search_memories)
+          if "user_id=user_id" in src or "filters={\"user_id\": user_id}" not in src:
+              sys.exit("FAIL: search_memories still calls mem0 with the 1.x signature")
+          if "get_all" not in src:
+              sys.exit("FAIL: search_memories has no blank-query get_all path (memory_list)")
+          print("  [ok] search_memories uses the mem0 2.x filters/top_k signature")
+          '
+
       - name: Log in to ghcr.io
         if: needs.verify.outputs.publish == 'true'
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
@@ -250,16 +286,17 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           # Provenance for anyone auditing what this image actually is: upstream
-          # at a named commit, plus one patch identified by content hash.
+          # at a named commit, plus a named patch set identified by content hash.
           labels: |
             org.opencontainers.image.title=headroom (patched)
-            org.opencontainers.image.description=Upstream Headroom plus patches/0001-headroom-neo4j-config-surface.patch
+            org.opencontainers.image.description=Upstream Headroom plus the patches in patches/upstream.env (Neo4j config surface, mem0 2.x search API)
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ github.sha }}
             io.headroom-for-workgroups.upstream.repo=${{ needs.verify.outputs.upstream_repo }}
             io.headroom-for-workgroups.upstream.commit=${{ needs.verify.outputs.upstream_commit }}
-            io.headroom-for-workgroups.patch.sha256=${{ needs.verify.outputs.patch_sha256 }}
+            io.headroom-for-workgroups.patches=${{ needs.verify.outputs.patches }}
+            io.headroom-for-workgroups.patches.sha256=${{ needs.verify.outputs.patches_sha256 }}
 
       # Keyless signed provenance bound to the digest. Verify with:
       #   gh attestation verify oci://<image>@<digest> -R <owner>/<repo>
@@ -460,10 +497,11 @@ jobs:
             echo "| patched Headroom image | \`ghcr.io/${OWNER}/headroom:${VERSION}\` |"
             echo "| | also \`:${UPSTREAM_SHORT}-neo4j\` and \`:latest\` |"
             echo
-            echo "The image is upstream Headroom at commit \`${UPSTREAM_SHORT}\` plus"
-            echo "\`patches/0001-headroom-neo4j-config-surface.patch\`, which is what makes"
-            echo "\`memory.enabled: true\` reachable. Which upstream commit and which"
-            echo "patch went in is recorded on the image itself:"
+            echo "The image is upstream Headroom at commit \`${UPSTREAM_SHORT}\` plus the"
+            echo "patch set pinned in \`patches/upstream.env\`: \`0001\` makes"
+            echo "\`memory.enabled: true\` reachable at all, and \`0002\` fixes memory"
+            echo "search against mem0 2.x. Which upstream commit and which patches went"
+            echo "in is recorded on the image itself:"
             echo
             echo '```sh'
             echo "docker inspect ghcr.io/${OWNER}/headroom:${VERSION} \\"

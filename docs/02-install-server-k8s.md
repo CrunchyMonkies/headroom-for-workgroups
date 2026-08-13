@@ -244,10 +244,19 @@ deliberately, delete the Secret key or set `auth.token` explicitly.
 
 The chart defaults to `ghcr.io/crunchymonkies/headroom`, built by this repo:
 upstream at the commit pinned in [`patches/upstream.env`](../patches/upstream.env)
-plus `patches/0001-headroom-neo4j-config-surface.patch`. The patch adds
-configuration surface and nothing else — with none of the new environment
-variables set, the container behaves exactly as upstream's does — but it is what
-makes `memory.enabled: true` reachable at all.
+plus the patches that file lists. Both matter only to `memory.enabled: true`:
+
+- `0001-headroom-neo4j-config-surface.patch` adds configuration surface and
+  nothing else — with none of the new environment variables set the container
+  behaves exactly as upstream's does — but it is what makes
+  `memory.enabled: true` reachable at all.
+- `0002-headroom-mem0-2x-search-api.patch` and
+  `0003-headroom-direct-write-payload-key.patch` are the two halves of memory
+  recall. Upstream calls mem0 with a 1.x signature that the 2.x it depends on
+  rejects on every call, and writes each memory's text under a payload key that
+  mem0 2.x does not read — so once the first is fixed, search finds the record,
+  scores it, and discards it on the way out. See
+  [`patches/README.md`](../patches/README.md).
 
 To run upstream's published image instead:
 

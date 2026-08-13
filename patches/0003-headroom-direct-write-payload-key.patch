@@ -1,0 +1,29 @@
+diff --git a/headroom/memory/backends/direct_mem0.py b/headroom/memory/backends/direct_mem0.py
+index 5fb72ec..4021681 100644
+--- a/headroom/memory/backends/direct_mem0.py
++++ b/headroom/memory/backends/direct_mem0.py
+@@ -305,8 +305,23 @@ class DirectMem0Adapter:
+             # Generate embedding
+             embedding = await asyncio.to_thread(self._embed, fact)
+ 
+-            # Build metadata payload
++            # Build metadata payload.
++            #
++            # `data` is the key Mem0 2.x reads the memory text out of. Its
++            # _search_vector_store drops any candidate whose payload["data"]
++            # is falsy — and it does so *after* scoring, so the record is
++            # found, ranked, then silently discarded. get_all is only half
++            # broken by the same schema gap: it returns the record, but with
++            # memory="" and the real text stranded under metadata. Writing
++            # only "memory" here is why a directly-written fact that raw
++            # Qdrant returns at score 0.81 came back from search as nothing.
++            #
++            # "memory" is kept alongside it rather than replaced: it is what
++            # every point already in the collection carries, what the
++            # fallback in search_memories below reads, and what an unpatched
++            # image would look for if this one were rolled back.
+             payload = {
++                "data": fact,
+                 "memory": fact,
+                 "user_id": user_id,
+                 "importance": importance,

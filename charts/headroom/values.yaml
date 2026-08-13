@@ -5,10 +5,12 @@ fullnameOverride: ""
 
 image:
   # This repo's own build: upstream at patches/upstream.env's pinned commit plus
-  # patches/0001-headroom-neo4j-config-surface.patch, published by
-  # .github/workflows/release.yml. The patch only adds configuration surface —
-  # with none of the new env vars set the behaviour is upstream's exactly — but
-  # it is what makes `memory.enabled: true` reachable at all.
+  # the patches that file lists, published by .github/workflows/release.yml.
+  # `0001` only adds configuration surface — with none of the new env vars set
+  # the behaviour is upstream's exactly — but it is what makes
+  # `memory.enabled: true` reachable at all. `0002` and `0003` are what make
+  # recall return anything: upstream calls mem0 2.x with the 1.x signature, and
+  # writes its memory text under a payload key mem0 2.x does not read.
   #
   # To go back to the published upstream image, set:
   #   repository: ghcr.io/chopratejas/headroom

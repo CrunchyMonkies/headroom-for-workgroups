@@ -1,9 +1,14 @@
 # Patches
 
-Patches this repo carries against upstream. Neither is required to run either
+Patches this repo carries against upstream. None is required to run either
 service in its default configuration: `0001` unlocks a capability upstream does
-not expose, and `0002` fixes a bug on a code path only `memory.enabled=true`
-reaches. Both are already in the published image.
+not expose, and `0002` and `0003` fix bugs on a code path only
+`memory.enabled=true` reaches. All three are already in the published image.
+
+`0002` and `0003` are two halves of the same symptom — memory that saves
+happily and recalls nothing. `0002` is why search raised; `0003` is why it
+returned empty once it stopped raising. Fixing either alone leaves recall
+broken, which is why they shipped one release apart rather than together.
 
 [`upstream.env`](upstream.env) is the single source of truth for the set — the
 pinned commit and `HEADROOM_PATCHES`, **an ordered list**. Each patch is
@@ -261,3 +266,93 @@ state the bug produces.
 
 Drop the entry from `HEADROOM_PATCHES` in `upstream.env` and bump
 `HEADROOM_BASE_COMMIT` past the merge. Nothing else references it by name.
+
+---
+
+## `0003-headroom-direct-write-payload-key.patch`
+
+**Against:** the same pinned commit, applied **after** `0002`.
+**Fixes:** semantic recall returning nothing for directly-written facts
+**Size:** 1 file changed, +16 / -1
+
+### The problem
+
+`0002` stopped memory search raising. It did not make it return anything —
+because a second, independent mismatch with mem0 2.x was sitting behind the
+exception, and only became observable once the exception was gone.
+
+Mem0 2.x reads a memory's text out of the payload key **`data`**. Headroom's
+direct-write path writes it as **`memory`**:
+
+```python
+payload = {
+    "memory": fact,   # <- mem0 2.x looks for "data"
+    "user_id": user_id,
+    ...
+}
+```
+
+`Memory._search_vector_store` then does this, in its final formatting loop:
+
+```python
+if not payload.get("data"):
+    continue  # Skip candidates with no payload data
+```
+
+That is *after* the vector search, the threshold check and the ranking — so
+the record is found at its correct score, ranked, and then discarded on the
+way out. Measured against the live deployment, with one fact stored and both
+paths given the identical query vector and filter:
+
+```
+raw qdrant query_points   ->  1 hit, score 0.8129
+mem0 Memory.search        ->  0 hits
+```
+
+`get_all` is only half broken by the same gap: it returns the record, but
+with `memory: ""` and the real text stranded under `metadata.memory`.
+Upstream's own result parsing has a `result.get("memory") or
+result_metadata.get("memory", ...)` fallback that quietly compensates for
+this on the list path — which is why `memory_list` looked healthy while
+search did not.
+
+Net effect, exactly as before `0002`: memory saves, reports healthy, and
+recalls nothing. Only the mechanism differs.
+
+### What the patch does
+
+Adds `"data": fact` to the payload written by `_write_facts_to_qdrant`, and
+keeps `"memory": fact` beside it. Both, not a rename:
+
+- every point already in the collection carries `memory`,
+- the result-parsing fallback in `search_memories` reads it,
+- and an unpatched image looks for it, so a rollback still finds text.
+
+The duplication is one short string per memory.
+
+### What it does not fix
+
+Points written before this patch. They have no `data` key, so mem0 2.x will
+keep skipping them on the search path — a re-write, not a migration, is what
+recovers them. `get_all` still returns them (via the fallback above), so
+`memory_list` sees the full history either way.
+
+### Checking that it is live
+
+```sh
+docker run --rm --entrypoint python3 ghcr.io/crunchymonkies/headroom:<tag> -c '
+import inspect
+from headroom.memory.backends.direct_mem0 import DirectMem0Adapter
+print(inspect.getsource(DirectMem0Adapter._write_facts_to_qdrant))' | grep '"data"'
+```
+
+The release workflow asserts the same thing before it pushes. But the only
+check that actually proves recall works is the round trip — save a fact, then
+search for it and get it back with a score. This bug is the reason to distrust
+anything less: it passed a green `/readyz`, a populated Qdrant, a working
+`memory_list`, and a patch verification that only looked at `search_memories`.
+
+### If upstream merges it
+
+Drop the entry from `HEADROOM_PATCHES` in `upstream.env` and bump
+`HEADROOM_BASE_COMMIT` past the merge.

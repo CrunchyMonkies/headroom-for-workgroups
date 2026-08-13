@@ -238,13 +238,14 @@ jobs:
           print("  [ok] qdrant_client, neo4j, mem0")
           '
 
-      # patches/0002 has no CLI surface to check, so it is asserted against the
-      # source in the layers instead. The bug it fixes is invisible from
-      # outside: memory search raises, the proxy logs a warning, /readyz stays
-      # green, and recall just returns nothing forever. An unpatched image
-      # cannot be told apart from a patched one at runtime without storing a
-      # memory first, so check the code.
-      - name: Verify patches/0002 is live in the image
+      # patches/0002 and 0003 have no CLI surface to check, so they are
+      # asserted against the source in the layers instead. Both bugs are
+      # invisible from outside: search raises (0002) or silently drops every
+      # record it found (0003), the proxy logs at most a warning, /readyz
+      # stays green, and recall just returns nothing forever. An unpatched
+      # image cannot be told apart from a patched one at runtime without
+      # storing a memory first, so check the code.
+      - name: Verify patches/0002 and 0003 are live in the image
         run: |
           set -euo pipefail
           docker run --rm --entrypoint python3 headroom-verify:local -c '
@@ -256,6 +257,11 @@ jobs:
           if "get_all" not in src:
               sys.exit("FAIL: search_memories has no blank-query get_all path (memory_list)")
           print("  [ok] search_memories uses the mem0 2.x filters/top_k signature")
+
+          write = inspect.getsource(DirectMem0Adapter._write_facts_to_qdrant)
+          if "\"data\": fact" not in write:
+              sys.exit("FAIL: direct writes omit the data payload key — mem0 2.x search will drop every record")
+          print("  [ok] direct writes carry the data payload key mem0 2.x reads")
           '
 
       - name: Log in to ghcr.io
@@ -289,7 +295,7 @@ jobs:
           # at a named commit, plus a named patch set identified by content hash.
           labels: |
             org.opencontainers.image.title=headroom (patched)
-            org.opencontainers.image.description=Upstream Headroom plus the patches in patches/upstream.env (Neo4j config surface, mem0 2.x search API)
+            org.opencontainers.image.description=Upstream Headroom plus the patches in patches/upstream.env (Neo4j config surface, mem0 2.x search API, mem0 2.x payload schema)
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -499,9 +505,11 @@ jobs:
             echo
             echo "The image is upstream Headroom at commit \`${UPSTREAM_SHORT}\` plus the"
             echo "patch set pinned in \`patches/upstream.env\`: \`0001\` makes"
-            echo "\`memory.enabled: true\` reachable at all, and \`0002\` fixes memory"
-            echo "search against mem0 2.x. Which upstream commit and which patches went"
-            echo "in is recorded on the image itself:"
+            echo "\`memory.enabled: true\` reachable at all, while \`0002\` and \`0003\`"
+            echo "are what make recall actually return anything — the first fixes the"
+            echo "mem0 2.x search call, the second the payload key that call reads."
+            echo "Which upstream commit and which patches went in is recorded on the"
+            echo "image itself:"
             echo
             echo '```sh'
             echo "docker inspect ghcr.io/${OWNER}/headroom:${VERSION} \\"

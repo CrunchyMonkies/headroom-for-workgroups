@@ -342,6 +342,70 @@ you must supply the equivalent yourself via `expose.ingress.annotations`.
 For Gateway API the chart sets `timeouts.request: 0s`; check your Gateway
 implementation honours it, since some enforce their own ceiling.
 
+### `API returned an empty or malformed response (HTTP 200)`
+
+Claude Code's full text is:
+
+```
+API Error: API returned an empty or malformed response (HTTP 200)
+— check for a proxy or gateway intercepting the request
+```
+
+It is not the gateway, and it is not your credential. It is CCR's buffered
+streaming path. Confirmed on the 0.34.0 image; upstream issue #2969 reports it
+still present on 0.35.0, so upgrading does not fix it.
+
+CCR injects a `headroom_retrieve` tool into every request. Its presence is also
+the trigger for a second behaviour — `proxy/handlers/anthropic.py`:
+
+```python
+buffered_stream_ccr = bool(stream and ccr_response_handler_enabled
+                           and self._has_headroom_retrieve_tool(...))
+```
+
+When that is true the proxy rewrites a `stream: true` request into a
+**non-streaming** upstream call, buffers the whole reply, and re-synthesizes SSE
+from it. `_BufferedCCRResponse.__call__` waits 1.0s, then commits
+`http.response.start` with status 200 and `content-type: text/event-stream` and
+begins emitting ping frames — *before* it knows how the upstream call went. If
+the upstream then errors, or the body does not parse, the guard
+(`... and response.status_code == 200 and resp_json`) fails and the code falls
+through to a plain non-SSE `Response` with no `body_iterator`. The client has
+already been promised a 200 SSE stream and receives pings and nothing else.
+
+Upstream PR #2968, "report the real upstream status on buffered CCR streams", is
+the fix and is not merged. Two things make this hard to spot from the outside:
+`headroom_requests_failed_total` stays at `0` because the proxy does not count it
+as a failure, and `/readyz` stays green throughout.
+
+Every Claude Code request streams, so this is not an edge case. The fix is to
+stop the tool being injected, which makes `_has_headroom_retrieve_tool` always
+`False` and the buffered path unreachable:
+
+```yaml
+headroom:
+  extraEnv:
+    - name: HEADROOM_NO_CCR
+      value: "1"
+```
+
+`--no-ccr`'s own help text names this situation: *"also right for streaming /
+non-MCP clients that can't resolve an injected tool"*. The cost is that tool-output
+compression becomes lossy with no recovery path. `HEADROOM_LOSSLESS=1` also drops
+the tool and keeps compression lossless, for less saving — either one closes the
+bug.
+
+Memory (`--memory`, Qdrant + Neo4j) is a separate feature and is unaffected by
+both, as is tool-schema compaction, which is usually supplying the large majority
+of the saving anyway. Verify after rollout:
+
+```sh
+kubectl -n workgroup exec deploy/wg-headroom -c proxy -- \
+  sh -c 'echo $HEADROOM_NO_CCR'                        # 1
+kubectl -n workgroup exec deploy/wg-headroom -c proxy -- \
+  curl -sS localhost:8787/readyz | jq .checks.memory   # still ready
+```
+
 ### Savings history is empty after a restart
 
 Either `stateless: true` (which disables all filesystem writes by design), or
@@ -690,6 +754,47 @@ export IX_COMMIT_HTTP_MAX_FILES=250   # smaller requests
 A 413 is the ingress body limit, not Ix. The chart sets 64 MB
 (`proxy-body-size: 64m`); raise it via `ix.expose.ingress.annotations` if your
 repo needs more.
+
+### The memory-layer is `OOMKilled` about a minute after every start
+
+```sh
+kubectl -n workgroup get pod -l app.kubernetes.io/name=ix -o jsonpath=\
+'{.items[0].status.containerStatuses[?(@.name=="memory-layer")].lastState.terminated}'
+# {"exitCode":137,"reason":"OOMKilled", ...}
+```
+
+Not a boot failure — it starts, serves `/v1/health` happily, and dies under the
+first large bulk write. Then it is handed the same write again on restart, so
+the restart count climbs steadily (24 in 16h in one case) while the pod keeps
+reporting `Running`.
+
+The load is the mapper posting the graph in bulk. One `/v1/patches/bulk` seen in
+that case carried 500 files, 7,858 nodes and 49,878 edges, with `insertEdges`
+alone taking 4.9s; the JVM holds the whole batch plus its ArangoDB driver
+buffers for the duration. The chart's 2Gi default does not cover it.
+
+```yaml
+ix:
+  memoryLayer:
+    resources:
+      requests:
+        cpu: 200m
+        memory: 1Gi
+      limits:
+        memory: 6Gi
+```
+
+There is no JVM-tuning lever to reach for instead: `memoryLayer` exposes
+`image`, `replicaCount` and `resources` and nothing else — no `extraEnv` — so
+`JAVA_TOOL_OPTIONS` cannot be set from the chart, and a `kubectl patch` is
+reverted by the next helm-controller sync. The container limit is the only knob.
+
+If it still OOMs, shrink the batches rather than raising the limit again — the
+same lever the 413 above uses:
+
+```sh
+export IX_COMMIT_HTTP_MAX_FILES=250
+```
 
 ### The graph is stale — changes are not showing up
 

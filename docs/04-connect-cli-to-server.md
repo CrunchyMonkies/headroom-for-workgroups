@@ -107,6 +107,21 @@ installers write and what upstream's own `TOOL_SEARCH_DEFAULT` uses.
 
 [746]: https://github.com/headroomlabs-ai/headroom/issues/746
 
+### If streaming responses come back empty
+
+A client that sends `stream: true` — which Claude Code always does — can get
+
+```
+API Error: API returned an empty or malformed response (HTTP 200)
+```
+
+That is not your client and not the gateway. Context-cache retrieval makes the
+proxy buffer streamed requests and re-synthesise the SSE, and it commits the
+`200` before it knows whether the upstream call worked. The fix is server-side
+(`HEADROOM_NO_CCR=1`) and the symptom is worth recognising from the client
+because nothing on the server reports an error:
+[07-troubleshooting.md](07-troubleshooting.md#api-returned-an-empty-or-malformed-response-http-200).
+
 ### Verify
 
 ```sh

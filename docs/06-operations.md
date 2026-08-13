@@ -209,6 +209,14 @@ Leave `IX_AUTO_MAP_CLOUD` unset. It is off against remote backends on purpose �
 turning it on means every client pushes a write on every file change, which is
 exactly the load pattern that produces the conflicts above.
 
+`IX_COMMIT_HTTP_MAX_FILES` has a server-side cost as well as a client-side one.
+The memory-layer holds an entire bulk request in the JVM while it inserts, and a
+500-file batch has been measured at 7,858 nodes and 49,878 edges — enough to
+OOMKill it against the chart's 2Gi default. The default of 1000 is twice that.
+If the memory-layer is being killed under mapping load, either give it more room
+(`ix.memoryLayer.resources.limits.memory`) or lower this — see
+[07-troubleshooting.md](07-troubleshooting.md#the-memory-layer-is-oomkilled-about-a-minute-after-every-start).
+
 ---
 
 ## Logs and observability

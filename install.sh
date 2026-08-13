@@ -73,8 +73,11 @@ CONNECTION
   --headroom-url URL     Base URL of the Headroom proxy (env: HEADROOM_URL)
   --ix-url URL           Base URL of the Ix memory-layer  (env: IX_URL)
 
-  --token TOKEN          Headroom proxy token. Lands in your shell history —
-                         prefer one of the two below.
+  --token TOKEN          Headroom proxy token, if the proxy has a token gate.
+                         Omit it for one that does not, and every client is
+                         routed — including a subscription/OAuth Claude Code,
+                         which a gated proxy cannot admit at all. Lands in
+                         your shell history — prefer one of the two below.
   --token-file PATH      Read the token from a file.
   --token-stdin          Read the token from stdin. Not usable in the
                          `curl … | bash` form, which already owns stdin.
@@ -103,7 +106,7 @@ kubectl port-forward, so pass the loopback URLs:
   install.sh --headroom-url http://127.0.0.1:8787 --ix-url http://127.0.0.1:8090
 
 Loopback callers are exempt from the Headroom token, so no --token is needed
-on that path.
+on that path either.
 EOF
 }
 
@@ -393,41 +396,69 @@ write_env_file() {
 
     if [ "$SKIP_HEADROOM" -eq 0 ]; then
       echo "# ---- Headroom (shared compression proxy) ----"
-      token_line
       echo
       echo "# Your own provider key is NOT set here and does not change. The proxy"
       echo "# holds no provider credentials — it forwards whatever key your client"
       echo "# sends. Keep ANTHROPIC_API_KEY / OPENAI_API_KEY exactly as they were."
       echo
-      echo "# Routing is enabled only for an API-key client, because that is the"
-      echo "# only kind the proxy can admit. Its token check reads Authorization"
-      echo "# first and ignores X-Headroom-Proxy-Token whenever Authorization is"
-      echo "# present — so a client sending its own bearer credential is rejected"
-      echo "# with 'unauthorized' even though it supplied a perfectly valid proxy"
-      echo "# token. A subscription/OAuth login to Claude Code is exactly that"
-      echo "# case, and there is no header left to move either credential into."
-      echo "#"
-      echo "# Exporting ANTHROPIC_BASE_URL unconditionally would therefore break"
-      echo "# such a client on its next launch, having worked before. Clients that"
-      echo "# authenticate with x-api-key are unaffected and route normally."
-      echo "#"
-      echo "# ANTHROPIC_CUSTOM_HEADERS is set inside the same guard on purpose."
-      echo "# The client attaches it to whatever host it talks to, so setting it"
-      echo "# while nothing routes to the proxy would send the proxy token to the"
-      echo "# provider on every request — a credential handed to a party that has"
-      echo "# no use for it, and one more place it can be logged."
-      echo "if [ -n \"\${ANTHROPIC_API_KEY:-}\" ]; then"
-      echo "  export ANTHROPIC_BASE_URL=$HEADROOM_URL"
-      echo '  export ANTHROPIC_CUSTOM_HEADERS="X-Headroom-Proxy-Token: $HEADROOM_PROXY_TOKEN"'
-      echo "fi"
-      echo "if [ -n \"\${OPENAI_API_KEY:-}\" ]; then"
-      echo "  export OPENAI_BASE_URL=$HEADROOM_URL/v1"
-      echo "fi"
-      echo
-      echo "# Force it on regardless (an API-key client the variables above cannot"
-      echo "# see, for instance) — both lines, or the proxy rejects you:"
-      echo "#   export ANTHROPIC_BASE_URL=$HEADROOM_URL"
-      echo "#   export ANTHROPIC_CUSTOM_HEADERS=\"X-Headroom-Proxy-Token: \$HEADROOM_PROXY_TOKEN\""
+
+      if [ -n "$TOKEN" ] || [ -n "$TOKEN_COMMAND" ]; then
+        token_line
+        echo
+        echo "# Routing is enabled only for an API-key client, because on a proxy"
+        echo "# with a token gate that is the only kind it can admit. The gate"
+        echo "# reads Authorization first and ignores X-Headroom-Proxy-Token"
+        echo "# whenever Authorization is present — so a client sending its own"
+        echo "# bearer credential is rejected with 'unauthorized' even though it"
+        echo "# supplied a perfectly valid proxy token. A subscription/OAuth login"
+        echo "# to Claude Code is exactly that case, and there is no header left"
+        echo "# to move either credential into."
+        echo "#"
+        echo "# Exporting ANTHROPIC_BASE_URL unconditionally would therefore break"
+        echo "# such a client on its next launch, having worked before. Clients"
+        echo "# that authenticate with x-api-key are unaffected and route normally."
+        echo "#"
+        echo "# ANTHROPIC_CUSTOM_HEADERS is set inside the same guard on purpose."
+        echo "# The client attaches it to whatever host it talks to, so setting it"
+        echo "# while nothing routes to the proxy would send the proxy token to the"
+        echo "# provider on every request — a credential handed to a party that has"
+        echo "# no use for it, and one more place it can be logged."
+        echo "if [ -n \"\${ANTHROPIC_API_KEY:-}\" ]; then"
+        echo "  export ANTHROPIC_BASE_URL=$HEADROOM_URL"
+        echo '  export ANTHROPIC_CUSTOM_HEADERS="X-Headroom-Proxy-Token: $HEADROOM_PROXY_TOKEN"'
+        echo "fi"
+        echo "if [ -n \"\${OPENAI_API_KEY:-}\" ]; then"
+        echo "  export OPENAI_BASE_URL=$HEADROOM_URL/v1"
+        echo "fi"
+        echo
+        echo "# Force it on regardless (an API-key client the variables above"
+        echo "# cannot see, for instance) — both lines, or the proxy rejects you:"
+        echo "#   export ANTHROPIC_BASE_URL=$HEADROOM_URL"
+        echo "#   export ANTHROPIC_CUSTOM_HEADERS=\"X-Headroom-Proxy-Token: \$HEADROOM_PROXY_TOKEN\""
+      else
+        echo "# No proxy token was given, so this routes every client"
+        echo "# unconditionally — including a subscription/OAuth login to Claude"
+        echo "# Code, which a token-gated proxy cannot admit at all."
+        echo "#"
+        echo "# Why that is safe to assume: the gate is skipped entirely when the"
+        echo "# proxy has no token configured, and the caller's Authorization"
+        echo "# header then passes straight through to the provider untouched."
+        echo "# Such a deployment is protected by reachability instead — a source"
+        echo "# CIDR rule at its gateway, or a private network."
+        echo "#"
+        echo "# ANTHROPIC_CUSTOM_HEADERS is deliberately NOT set. There is no"
+        echo "# token to send, and setting one would only leak it to the provider."
+        echo "#"
+        echo "# If you point these at a proxy that DOES have a token gate, an"
+        echo "# API-key client will get 401 {\"error\":\"unauthorized\"} on every"
+        echo "# request. Re-run install.sh with --token-file/--token-command and"
+        echo "# it will write the guarded form instead."
+        echo "export ANTHROPIC_BASE_URL=$HEADROOM_URL"
+        echo "export OPENAI_BASE_URL=$HEADROOM_URL/v1"
+        echo
+        echo "# Opt back out for one shell without editing this file:"
+        echo "#   unset ANTHROPIC_BASE_URL OPENAI_BASE_URL"
+      fi
       echo
     fi
 
@@ -448,7 +479,9 @@ write_env_file() {
   if [ -n "$TOKEN" ] && [ -z "$TOKEN_COMMAND" ]; then
     info "the token is stored in that file in clear text; --token-command keeps it in a secret manager instead"
   elif [ -z "$TOKEN" ] && [ -z "$TOKEN_COMMAND" ] && [ "$SKIP_HEADROOM" -eq 0 ]; then
-    warn "no token given — /v1/* will 401 unless you reach the proxy over loopback"
+    info "no token given — every client routes through the proxy, which is right"
+    info "  for a proxy with no token gate. If it has one, /v1/* will 401; re-run"
+    info "  with --token-file or --token-command."
   fi
 }
 

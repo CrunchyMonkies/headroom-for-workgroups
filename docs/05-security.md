@@ -52,12 +52,29 @@ X-Headroom-Proxy-Token: <token>
 Loopback callers are exempt — that is what makes the `kubectl port-forward`
 workflow work without a credential.
 
-**The default must not be turned off.** In-cluster the proxy binds `0.0.0.0`,
-so with no token every `/v1/*` route is reachable unauthenticated from the
-entire pod network. Upstream logs a loud `event=proxy_open_bind` warning when
-this happens. The chart sets a token by default and refuses to render an
-Ingress or HTTPRoute with `auth.enabled=false` unless you set
-`auth.acknowledgeUnauthenticated: true`.
+**Do not turn the default off without putting something in its place.**
+In-cluster the proxy binds `0.0.0.0`, so with no token every `/v1/*` route is
+reachable unauthenticated from the entire pod network. Upstream logs a loud
+`event=proxy_open_bind` warning when this happens. The chart sets a token by
+default and refuses to render an Ingress or HTTPRoute with `auth.enabled=false`
+unless you set `auth.acknowledgeUnauthenticated: true`.
+
+There is one legitimate reason to turn it off, and it is not "the token is
+inconvenient": **the token and a bearer-authenticating client are mutually
+exclusive.** The check reads `Authorization` before `X-Headroom-Proxy-Token`,
+so it compares the client's own credential against the proxy token and rejects
+it — Claude Code on a Claude subscription can never pass. If your team needs
+those clients, `auth.enabled: false` plus a source-CIDR `SecurityPolicy` at the
+gateway is a coherent posture; `auth.enabled: false` on its own is an open
+proxy. Both halves are set out in
+[07-troubleshooting.md](07-troubleshooting.md#unauthorized-with-a-valid-proxy-token--subscriptionoauth-clients).
+
+Weigh what that actually exposes. The proxy holds no provider credential — it
+forwards whatever key the client sends — so an unauthorized caller cannot spend
+your provider budget. What they get is your compression capacity, and the
+ability to send prompt text through a service that logs and stores it. A
+network perimeter is a coarser control than a token: it authorizes an address,
+not a person, and it cannot be revoked for one user.
 
 The token is a single shared secret for the whole team. It authenticates
 "someone from our team", not "Alice". If you need per-person attribution or

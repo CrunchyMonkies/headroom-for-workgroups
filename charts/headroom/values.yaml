@@ -32,6 +32,15 @@ replicaCount: 1
 # preserved across `helm upgrade` (read back from the live Secret) so client
 # credentials are never silently rotated.
 auth:
+  # The proxy token and a bearer-authenticating client are mutually exclusive.
+  # The check reads Authorization before X-Headroom-Proxy-Token, so it compares
+  # the client's own credential against the proxy token and rejects it —
+  # Claude Code on a Claude subscription can never pass, however correct the
+  # X-Headroom-Proxy-Token it also sends. x-api-key clients are unaffected.
+  # Turning this off is the only way to admit those clients; do it together
+  # with a source-address restriction at the gateway, never alone. Reasoning
+  # and the SecurityPolicy to pair it with: docs/07-troubleshooting.md,
+  # "unauthorized with a valid proxy token".
   enabled: true
   token: ""
   existingSecret: ""

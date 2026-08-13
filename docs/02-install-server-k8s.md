@@ -169,8 +169,14 @@ ix:
 The Headroom HTTPRoute sets `timeouts.request: 0s` (no limit) for the same
 streaming reason. Ix uses 900s.
 
-Headroom needs nothing further: it checks `HEADROOM_PROXY_TOKEN` on every
-request itself, and leaves `/readyz` exempt so a monitor can still reach it.
+Headroom needs nothing further while `auth.enabled: true`: it checks
+`HEADROOM_PROXY_TOKEN` on every request itself, and leaves `/readyz` exempt so
+a monitor can still reach it. If you have turned the token off so that
+bearer-authenticating clients can connect, it needs the same source-address
+treatment as Ix — see
+[Restricting by source address](#restricting-by-source-address-instead), and
+[07-troubleshooting.md](07-troubleshooting.md#unauthorized-with-a-valid-proxy-token--subscriptionoauth-clients)
+for why you would.
 
 Ix has no authentication of its own, and neither chart-provided mode helps here:
 `auth.mode: basic` is implemented as ingress-controller annotations with **no

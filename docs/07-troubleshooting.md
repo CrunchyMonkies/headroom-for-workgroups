@@ -257,11 +257,76 @@ proxy will read. **Claude Code logged in with a Claude subscription is exactly
 this case**; with `ANTHROPIC_API_KEY` set it is not.
 
 That is why `install.sh` exports `ANTHROPIC_BASE_URL` only when
-`ANTHROPIC_API_KEY` is present. Exporting it unconditionally breaks a
-subscription login on its next launch, and the symptom — a tool that worked
-yesterday now failing to authenticate — points nowhere near a proxy someone
-else installed. Override it by exporting the variable yourself, after the
-sourced `env.sh`.
+`ANTHROPIC_API_KEY` is present **and you gave it a token**. Exporting it
+unconditionally against a gated proxy breaks a subscription login on its next
+launch, and the symptom — a tool that worked yesterday now failing to
+authenticate — points nowhere near a proxy someone else installed. Override it
+by exporting the variable yourself, after the sourced `env.sh`.
+
+**The fix is on the server side: drop the token and guard the proxy by
+network instead.** The gate is skipped entirely when no token is configured —
+`if _proxy_token:` wraps the whole middleware — and the caller's `Authorization`
+header then passes through to the provider untouched. That is the same code
+path loopback callers have always taken, so it is upstream behaviour rather
+than a hole:
+
+```yaml
+auth:
+  enabled: false
+  acknowledgeUnauthenticated: true    # the chart refuses otherwise
+```
+
+Verify with a deliberately invalid bearer. You want the provider's error, not
+the proxy's:
+
+```sh
+curl -s https://headroom.example.com/v1/messages \
+  -H 'Content-Type: application/json' -H 'anthropic-version: 2023-06-01' \
+  -H 'Authorization: Bearer sk-ant-oat-FAKE' \
+  -d '{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'
+# forwarding:  {"type":"error","error":{"type":"authentication_error", ...
+# still gated: {"error":"unauthorized"}
+```
+
+`acknowledgeUnauthenticated` is a promise that something else guards the
+proxy, and you must actually keep it — every `/v1/*` route is now open to
+anything that can reach the address. It holds no provider credential of its
+own, so what is exposed is your compression budget and the prompt text in
+flight, not your provider billing. Put a source-address restriction in front
+of it. On Envoy Gateway:
+
+```yaml
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: headroom-allow-lan
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: <release>          # the Headroom route is named after the release
+  authorization:
+    defaultAction: Deny
+    rules:
+      - name: lan
+        action: Allow
+        principal:
+          clientCIDRs: [10.0.0.0/8]
+```
+
+This only means anything if the gateway sees real client addresses — its
+Service must be `externalTrafficPolicy: Local`. With `Cluster`, every request
+appears to come from a node IP, which is itself inside `10.0.0.0/8`, so the
+rule passes everything **and looks like it is working**. Check the policy
+attached at all, too; a `targetRefs.name` that matches nothing detaches
+silently:
+
+```sh
+kubectl -n <ns> get securitypolicy headroom-allow-lan -o jsonpath='{.status.ancestors[*].conditions[*]}'
+```
+
+Re-run `install.sh` without any `--token*` flag afterwards and it writes the
+unconditional form, which routes subscription clients too.
 
 Two smaller consequences of a custom `ANTHROPIC_BASE_URL`, independent of this:
 Claude Code disables `/remote-control` and gates the 1M-context window. Both are

@@ -394,6 +394,81 @@ failure is silent in both directions: no error at write time in the proxy log,
 and no signal in `/readyz`. If the embeddings pod runs on a node that can go
 away, treat the probe above as the real memory health check.
 
+**Mind the `dims:` the probe prints.** If it is not 1536, memory cannot store
+anything even with the endpoint perfectly healthy — see the next section.
+
+### The embeddings endpoint is healthy, and writes still fail on dimensions
+
+Only if you point `memory.embeddings.baseUrl` at something other than OpenAI.
+Every self-hosted embedding model worth using has its own vector width — 1024
+for the Qwen and Jina families, 768 for most BGE and E5 variants — and none of
+them is 1536.
+
+Headroom asks for `text-embedding-3-small` and its vector store expects that
+model's 1536 dimensions. Neither is configurable: `DirectMem0Config.embedder_model`
+hardcodes the model name, and the mem0 config it builds never sets
+`embedding_model_dims`, so mem0 falls back to its own default of 1536. An
+OpenAI-compatible server ignores the model name it was sent, answers `200` with
+its native width, and every write is then rejected by Qdrant:
+
+```
+Wrong input: Vector dimension error: expected dim: 1536, got 1024
+```
+
+The symptom is identical to an embeddings outage — memory silently stores
+nothing — so check the collection, not just the endpoint:
+
+```sh
+kubectl -n workgroup exec deploy/wg-headroom -- python3 -c '
+import os, json, urllib.request
+b = os.environ["HEADROOM_QDRANT_URL"].rstrip("/")
+r = json.load(urllib.request.urlopen(b + "/collections/headroom_memories"))["result"]
+print("collection dims:", r["config"]["params"]["vectors"]["size"],
+      "points:", r["points_count"])'
+```
+
+If that number does not match the `dims:` from the embeddings probe, this is
+your problem.
+
+**The fix is to build the collection at your endpoint's width.** mem0's
+`create_col` skips creation when the collection already exists and never
+validates its dimensions, so a collection you create yourself is adopted
+permanently. Confirm it is empty first — this discards whatever is in it:
+
+```sh
+kubectl -n workgroup exec deploy/wg-headroom -- python3 - <<'PY'
+import json, os, urllib.request
+B = os.environ["HEADROOM_QDRANT_URL"].rstrip("/")
+DIMS = 1024                      # <- your endpoint's width, from the probe above
+
+def call(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(B + path, data,
+        {"Content-Type": "application/json"}, method=method)
+    return json.load(urllib.request.urlopen(req, timeout=30))
+
+n = call("GET", "/collections/headroom_memories")["result"]["points_count"]
+assert n == 0, f"collection holds {n} points - not deleting it"
+call("DELETE", "/collections/headroom_memories")
+call("PUT", "/collections/headroom_memories", {
+    "vectors": {"size": DIMS, "distance": "Cosine", "on_disk": False},
+    "sparse_vectors": {"bm25": {"modifier": "idf"}}})
+for f in ("user_id", "actor_id", "agent_id", "run_id"):
+    call("PUT", "/collections/headroom_memories/index?wait=true",
+         {"field_name": f, "field_schema": "keyword"})
+print("rebuilt at", DIMS)
+PY
+```
+
+The `bm25` sparse slot and the four keyword indexes are not decoration: without
+the sparse slot mem0 disables hybrid keyword scoring on that collection, and it
+logs the reason only at `debug`.
+
+**This survives restarts but not a deleted collection.** Nothing records the
+intended width, so if the collection is ever dropped, mem0 recreates it at 1536
+and memory silently stops storing again — with a healthy `/readyz` throughout.
+If you rebuild the stack, rebuild the collection too.
+
 ### Provider calls fail with 401 from Anthropic/OpenAI
 
 That is your own key, not the proxy's. The proxy holds no provider credentials

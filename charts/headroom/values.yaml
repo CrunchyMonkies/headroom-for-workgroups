@@ -119,6 +119,17 @@ memory:
     # Any OpenAI-compatible /v1/embeddings endpoint — a local text-embeddings
     # server, LiteLLM, Azure OpenAI. Sets OPENAI_BASE_URL. The key is still
     # required; send a placeholder if your endpoint ignores it.
+    #
+    # Point this anywhere other than OpenAI and you must rebuild the Qdrant
+    # collection at your model's vector width before memory can store anything.
+    # Upstream hardcodes the model name and never passes embedding_model_dims,
+    # so mem0 creates the collection at text-embedding-3-small's 1536 while your
+    # endpoint returns its own width (1024 for Qwen and Jina, 768 for most BGE
+    # and E5) — it answers 200, and Qdrant then rejects every write with
+    # "expected dim: 1536, got 1024". /readyz stays healthy throughout, so this
+    # looks exactly like an embeddings outage. Procedure and the reason it
+    # sticks: docs/07-troubleshooting.md, "The embeddings endpoint is healthy,
+    # and writes still fail on dimensions".
     baseUrl: ""
 
   qdrant:

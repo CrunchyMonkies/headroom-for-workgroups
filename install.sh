@@ -394,7 +394,6 @@ write_env_file() {
     if [ "$SKIP_HEADROOM" -eq 0 ]; then
       echo "# ---- Headroom (shared compression proxy) ----"
       token_line
-      echo 'export ANTHROPIC_CUSTOM_HEADERS="X-Headroom-Proxy-Token: $HEADROOM_PROXY_TOKEN"'
       echo
       echo "# Your own provider key is NOT set here and does not change. The proxy"
       echo "# holds no provider credentials — it forwards whatever key your client"
@@ -411,16 +410,24 @@ write_env_file() {
       echo "# Exporting ANTHROPIC_BASE_URL unconditionally would therefore break"
       echo "# such a client on its next launch, having worked before. Clients that"
       echo "# authenticate with x-api-key are unaffected and route normally."
+      echo "#"
+      echo "# ANTHROPIC_CUSTOM_HEADERS is set inside the same guard on purpose."
+      echo "# The client attaches it to whatever host it talks to, so setting it"
+      echo "# while nothing routes to the proxy would send the proxy token to the"
+      echo "# provider on every request — a credential handed to a party that has"
+      echo "# no use for it, and one more place it can be logged."
       echo "if [ -n \"\${ANTHROPIC_API_KEY:-}\" ]; then"
       echo "  export ANTHROPIC_BASE_URL=$HEADROOM_URL"
+      echo '  export ANTHROPIC_CUSTOM_HEADERS="X-Headroom-Proxy-Token: $HEADROOM_PROXY_TOKEN"'
       echo "fi"
       echo "if [ -n \"\${OPENAI_API_KEY:-}\" ]; then"
       echo "  export OPENAI_BASE_URL=$HEADROOM_URL/v1"
       echo "fi"
       echo
       echo "# Force it on regardless (an API-key client the variables above cannot"
-      echo "# see, for instance):"
+      echo "# see, for instance) — both lines, or the proxy rejects you:"
       echo "#   export ANTHROPIC_BASE_URL=$HEADROOM_URL"
+      echo "#   export ANTHROPIC_CUSTOM_HEADERS=\"X-Headroom-Proxy-Token: \$HEADROOM_PROXY_TOKEN\""
       echo
     fi
 
